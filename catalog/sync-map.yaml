@@ -44,9 +44,7 @@ pairs:
   - source: eventflow-storefront
     target: eventflow-storefront
     sync: pr-on-diverge
-    # upstream caught up via codev-workshops/eventflow-storefront#1 (merged, so the target keeps
-    # 1 lab commit + merge commits of its own)
-    # target_ahead as of last verification
+    # re-mirrored 2026-09-01 (old drifted copy archived as -lab); in_sync as of last verification
   - source: fineract
     target: fineract
     # in_sync as of last verification
@@ -343,6 +341,7 @@ duplicates:
 # codev-workshops repos that are not derived from the source org. The sync tool
 # never touches anything outside `pairs:`; this list only documents intent.
 ignore_targets:
+  - eventflow-storefront-lab
   - uc-cve-remediation-regulatory-compliance-lab
   - uc-dw-migration-teradata-to-snowflake-lab
   - uc-legacy-modernization-cobol-to-java-lab
