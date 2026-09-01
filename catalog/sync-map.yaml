@@ -1,0 +1,406 @@
+# sync-map.yaml
+#
+# Authoritative mapping of Cognition-Partner-Workshops (source) repos to their
+# codev-workshops (target) copies, used by scripts/sync_from_source.py.
+#
+# Pairs were established by SHARED GIT HISTORY (identical root commit), not by name:
+# the two orgs use different naming conventions, and several repos share a name while
+# having completely unrelated history (see `collisions` below). Never add a pair by
+# name alone — run `scripts/sync_from_source.py discover` to verify.
+#
+# sync policy per pair:
+#   ff-only        push only when the target is strictly behind the source default branch
+#                  (never a force push, so target-side lab commits can never be lost)
+#   pr-on-diverge  same, but when both sides moved, open a PR in the target instead
+#   off            never touch this repo
+#
+# Last verified: 2026-09-01
+
+defaults:
+  source_org: Cognition-Partner-Workshops
+  target_org: codev-workshops
+  sync: ff-only
+  new_repos: mirror          # report | mirror  (mirror needs GITHUB_MIRROR_PAT)
+
+pairs:
+  - source: calcom
+    target: calcom
+    # in_sync as of last verification
+  - source: calcom-dataeng
+    target: calcom-dataeng
+    # in_sync as of last verification
+  - source: calcom-infra
+    target: calcom-infra
+    # in_sync as of last verification
+  - source: eventflow-infra
+    target: eventflow-infra
+    # in_sync as of last verification
+  - source: eventflow-order-service
+    target: eventflow-order-service
+    # in_sync as of last verification
+  - source: eventflow-payment-service
+    target: eventflow-payment-service
+    # in_sync as of last verification
+  - source: eventflow-storefront
+    target: eventflow-storefront
+    sync: pr-on-diverge
+    # both sides have unique commits on main; the target ones are lab work
+    # diverged as of last verification; open sync PR: codev-workshops/eventflow-storefront#1
+  - source: fineract
+    target: fineract
+    # in_sync as of last verification
+  - source: fineract-web-app
+    target: fineract-web-app
+    # in_sync as of last verification
+  - source: jpetstore-6
+    target: jpetstore-6
+    # in_sync as of last verification
+  - source: keycloak
+    target: keycloak
+    # in_sync as of last verification
+  - source: modular-monolith-ddd
+    target: modular-monolith-ddd
+    # in_sync as of last verification
+  - source: modular-monolith-ddd-react
+    target: modular-monolith-ddd-react
+    # in_sync as of last verification
+  - source: ofbiz-framework
+    target: ofbiz-framework
+    # in_sync as of last verification
+  - source: openmrs-core
+    target: openmrs-core
+    # in_sync as of last verification
+  - source: ordermanager-iac
+    target: ordermanager-iac
+    # in_sync as of last verification
+  - source: ordermanager-monolith
+    target: ordermanager-monolith
+    # in_sync as of last verification
+  - source: petclinic-angular
+    target: petclinic-angular
+    # in_sync as of last verification
+  - source: petclinic-backend
+    target: petclinic-backend
+    # in_sync as of last verification
+  - source: petclinic-microservices
+    target: petclinic-microservices
+    # in_sync as of last verification
+  - source: platform-engineering-shared-services
+    target: platform-engineering-shared-services
+    # in_sync as of last verification
+  - source: quickapp-iac
+    target: quickapp-iac
+    # in_sync as of last verification
+  - source: quickapp-microfrontends
+    target: quickapp-microfrontends
+    # in_sync as of last verification
+  - source: quickapp-microservices
+    target: quickapp-microservices
+    # in_sync as of last verification
+  - source: quickapp-monolith
+    target: quickapp-monolith
+    # in_sync as of last verification
+  - source: ruby-redmine
+    target: ruby-redmine
+    # in_sync as of last verification
+  - source: timesheet-app
+    target: timesheet-app
+    # in_sync as of last verification
+  - source: timesheet-infra
+    target: timesheet-infra
+    # in_sync as of last verification
+  - source: traderx
+    target: traderx
+    # in_sync as of last verification
+  - source: ts-angular-realworld
+    target: ts-angular-realworld
+    # in_sync as of last verification
+  - source: ts-angularjs-blur-admin
+    target: ts-angularjs-blur-admin
+    # in_sync as of last verification
+  - source: ts-angularjs-dashboard-widgets
+    target: ts-angularjs-dashboard-widgets
+    # in_sync as of last verification
+  - source: ts-cobol-carddemo
+    target: ts-cobol-carddemo
+    # in_sync as of last verification
+  - source: ts-informatica-powercenter
+    target: ts-informatica-powercenter
+    # in_sync as of last verification
+  - source: ts-java-angular-jhipster
+    target: ts-java-angular-jhipster
+    # in_sync as of last verification
+  - source: ts-java-mulesoft-employee-api
+    target: ts-java-mulesoft-employee-api
+    # in_sync as of last verification
+  - source: ts-java-real-estate-management
+    target: ts-java-real-estate-management
+    # in_sync as of last verification
+  - source: ts-java-selenium-testng
+    target: ts-java-selenium-testng
+    # in_sync as of last verification
+  - source: ts-java-spring-boot-realworld
+    target: ts-java-spring-boot-realworld
+    # in_sync as of last verification
+  - source: ts-java-swagger-petstore
+    target: ts-java-swagger-petstore
+    # in_sync as of last verification
+  - source: ts-katalon-web-automation
+    target: ts-katalon-web-automation
+    # in_sync as of last verification
+  - source: ts-plsql-oracle-forms-hrms
+    target: ts-plsql-oracle-forms-hrms
+    # in_sync as of last verification
+  - source: ts-python-aws-personalize
+    target: ts-python-aws-personalize
+    # in_sync as of last verification
+  - source: ts-python-streamify-data-engineering
+    target: ts-python-streamify-data-engineering
+    # in_sync as of last verification
+  - source: ts-react-coreui-admin
+    target: ts-react-coreui-admin
+    # in_sync as of last verification
+  - source: ts-sas-legacy-analytics
+    target: ts-sas-legacy-analytics
+    # in_sync as of last verification
+  - source: ts-serverless-digital-asset-payments
+    target: ts-serverless-digital-asset-payments
+    # in_sync as of last verification
+  - source: ts-serverless-eda-insurance-claims
+    target: ts-serverless-eda-insurance-claims
+    # in_sync as of last verification
+  - source: uc-bdd-test-generation-cucumber
+    target: uc-bdd-test-generation-cucumber
+    # in_sync as of last verification
+  - source: uc-cve-remediation-regulatory-compliance
+    target: uc-cve-remediation-regulatory-compliance
+    # re-mirrored 2026-09-01 (old drifted copy archived as -lab); in_sync as of last verification
+  - source: uc-data-migration-airflow
+    target: uc-data-migration-airflow
+    # in_sync as of last verification
+  - source: uc-data-migration-sas-to-snowflake
+    target: uc-data-migration-sas-to-snowflake
+    # in_sync as of last verification
+  - source: uc-data-source-migration-jdbc-normalization
+    target: uc-data-source-migration-jdbc-normalization
+    # in_sync as of last verification
+  - source: uc-document-review-automation
+    target: uc-document-review-automation
+    # in_sync as of last verification
+  - source: uc-dw-migration-teradata-to-snowflake
+    target: uc-dw-migration-teradata-to-snowflake
+    # re-mirrored 2026-09-01 (old drifted copy archived as -lab); in_sync as of last verification
+  - source: uc-java-upgrade-broadleaf-commerce
+    target: uc-java-upgrade-broadleaf-commerce
+    # in_sync as of last verification
+  - source: uc-legacy-modernization-cobol-to-java
+    target: uc-legacy-modernization-cobol-to-java
+    # re-mirrored 2026-09-01 (old drifted copy archived as -lab); in_sync as of last verification
+  - source: uc-legacy-modernization-oracle-forms-to-java
+    target: uc-legacy-modernization-oracle-forms-to-java
+    # in_sync as of last verification
+  - source: uc-pod-remediation-credential-rotation
+    target: uc-pod-remediation-credential-rotation
+    # in_sync as of last verification
+  - source: uc-product-analysis-loan-modernization
+    target: uc-product-analysis-loan-modernization
+    # in_sync as of last verification
+  - source: uc-spring-boot-upgrade-microservice-extraction
+    target: uc-spring-boot-upgrade-microservice-extraction
+    # in_sync as of last verification
+  - source: uc-volume-anomaly-detection
+    target: uc-volume-anomaly-detection
+    # in_sync as of last verification
+  - source: workshop-content
+    target: workshop-content
+    # was workshop-metadata, which carried the sync tooling and was therefore permanently
+    # target-ahead; the tooling moved to codev-workshops/workshop-sync and the old repo was
+    # archived as workshop-metadata-lab, so this is now a plain mirror
+    # in_sync as of last verification
+
+  - source: ACC-demo-webapp
+    target: ACC-demo-webapp
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: banking-dashboard-api
+    target: banking-dashboard-api
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: eShopModernizing
+    target: eShopModernizing
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: i-retail-mern-ecommerce
+    target: i-retail-mern-ecommerce
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: ordermanager-microservices
+    target: ordermanager-microservices
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: otterworks
+    target: otterworks
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: petclinic-rest-api
+    target: petclinic-rest-api
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: ts-dart-flutter-ecommerce
+    target: ts-dart-flutter-ecommerce
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: ts-java-spring-boot-internet-banking
+    target: ts-java-spring-boot-internet-banking
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: ts-java-struts-claims-management
+    target: ts-java-struts-claims-management
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: ts-python-abinitio-etl
+    target: ts-python-abinitio-etl
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-api-migration-mulesoft-to-boomi
+    target: uc-api-migration-mulesoft-to-boomi
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-api-migration-mulesoft-to-spring-boot
+    target: uc-api-migration-mulesoft-to-spring-boot
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-appsec-mern-marketplace
+    target: uc-appsec-mern-marketplace
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-data-migration-abinitio-to-databricks
+    target: uc-data-migration-abinitio-to-databricks
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-data-migration-abinitio-to-pyspark
+    target: uc-data-migration-abinitio-to-pyspark
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-data-migration-sas-to-databricks
+    target: uc-data-migration-sas-to-databricks
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-db-migration-oracle-to-postgres
+    target: uc-db-migration-oracle-to-postgres
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-dw-migration-teradata-to-bigquery
+    target: uc-dw-migration-teradata-to-bigquery
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-finance-app-automations
+    target: uc-finance-app-automations
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-informatica-sas-to-dbt
+    target: uc-informatica-sas-to-dbt
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-legacy-modernization-struts-to-microservices
+    target: uc-legacy-modernization-struts-to-microservices
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-payment-payload-analysis-banking
+    target: uc-payment-payload-analysis-banking
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-self-healing-data-pipeline
+    target: uc-self-healing-data-pipeline
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-vulnerability-remediation-java-dotnet
+    target: uc-vulnerability-remediation-java-dotnet
+    # re-mirrored 2026-09-01 (old drifted copy archived as -lab); in_sync as of last verification
+  - source: workshop-operations
+    target: workshop-operations
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: eventflow-devin-integration
+    target: eventflow-devin-integration
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: uc-appsec-nodegoat
+    target: uc-appsec-nodegoat
+    # mirrored from source on 2026-09-01; in_sync as of last verification
+
+# Source repos with no counterpart in codev-workshops. With `new_repos: mirror` these
+# are created and populated on the next run, then moved into `pairs:`.
+new_repos: []
+
+
+# Same name in both orgs, completely different history. Documented so nobody ever
+# "fixes" the map by matching these on name.
+# Resolved on 2026-09-01: the unrelated same-name repo was renamed to `<name>-lab` and
+# archived, then the real copy took the source name — so `target` now equals `source`
+# everywhere except workshop-content -> workshop-metadata (this repo).
+collisions:
+  - source: ordermanager-monolith
+    real_target: ordermanager-monolith          # was app_dotnet-angular-monolith
+    unrelated_same_name_target: ordermanager-monolith-lab           # archived
+  - source: ordermanager-iac
+    real_target: ordermanager-iac               # was app_dotnet-angular-monolith-iac
+    unrelated_same_name_target: ordermanager-iac-lab                # archived
+  - source: uc-data-source-migration-jdbc-normalization
+    real_target: uc-data-source-migration-jdbc-normalization
+    # was uc-data-source-migration-legacy-to-modern
+    unrelated_same_name_target: uc-data-source-migration-jdbc-normalization-lab   # archived
+  - source: ordermanager-microservices
+    real_target: ordermanager-microservices     # was ts-ordermanager-microservices
+    unrelated_same_name_target: ordermanager-microservices-lab      # archived
+
+# Duplicate copies inside codev-workshops (same root commit), archived on 2026-09-01.
+# Listed here so the sync never writes to them.
+duplicates:
+  - repo: mainframe-modernization-carddemo
+    duplicate_of: ts-cobol-carddemo
+    note: 1 branch, 0 PRs, stale copy of the CardDemo upstream; archived
+  - repo: uc-framework-upgrade-monolith-to-microservices
+    duplicate_of: uc-spring-boot-upgrade-microservice-extraction
+    note: pre-rename name; 0 unique commits on main but 26 branches / 25 PRs of lab history;
+      open PRs closed and repo archived (history stays readable)
+
+# codev-workshops repos that are not derived from the source org. The sync tool
+# never touches anything outside `pairs:`; this list only documents intent.
+ignore_targets:
+  - uc-cve-remediation-regulatory-compliance-lab
+  - uc-dw-migration-teradata-to-snowflake-lab
+  - uc-legacy-modernization-cobol-to-java-lab
+  - uc-vulnerability-remediation-java-dotnet-lab
+  - workshop-metadata-lab
+  - workshop-sync
+  - Getting-Started-with-Talend-Open-Studio-for-Data-Integration
+  - Informatica-Data-Integration-and-Transformation-Project
+  - Informatica-pwc-ETL-projects
+  - OBA-android-app
+  - OBA-backend-spring-boot
+  - Online-Banking-System-using-Java
+  - PySpark-hands-on-tutorial
+  - SuiteCRM
+  - Tutor-Bank
+  - android-barcode-scanner
+  - android-embedded
+  - angular2-hn
+  - bagisto
+  - bhaskar887-superset
+  - custom_app-test
+  - custom_coboltest
+  - custom_sas-to-snowflake-experiment
+  - custom_service-app1
+  - custom_service-app2
+  - data-analyst-demo
+  - devin-csuite-android-dashboard
+  - devin-learning
+  - devin-usage-dashboard
+  - devin-usage-stats-asiri-test
+  - eShopOnContainers-ShipVia-Example
+  - ev-compare
+  - insight-tone
+  - ivozprovider
+  - mcp-tests-praveen
+  - onboarding-diary
+  - onboarding-diary-app
+  - onboarding-diary-web
+  - opencms-core
+  - oracle-pg-lab-session-a
+  - oracle-pg-lab-session-b
+  - oracle-to-postgres-migration-lab
+  - ordermanager-iac-lab
+  - ordermanager-microservices-lab
+  - ordermanager-monolith-lab
+  - owid-etl
+  - patient-profile-react
+  - ponytail
+  - price-tracker
+  - prototype-1
+  - saleor-ShipVia-Example
+  - talend-sample-1
+  - talend-sample-2
+  - talend-sample-3
+  - test-access
+  - tibco-examples
+  - todo-app-sandbox-infra
+  - uc-Quality-Engineering-and-Assurance
+  - uc-data-source-migration-jdbc-normalization-lab
+  - ui-implementation-demo
+  - weather-dashboard
+  - weather-dashboard-al-test
