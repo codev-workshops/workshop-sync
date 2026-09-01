@@ -44,8 +44,9 @@ pairs:
   - source: eventflow-storefront
     target: eventflow-storefront
     sync: pr-on-diverge
-    # both sides have unique commits on main; the target ones are lab work
-    # diverged as of last verification; open sync PR: codev-workshops/eventflow-storefront#1
+    # upstream caught up via codev-workshops/eventflow-storefront#1 (merged, so the target keeps
+    # 1 lab commit + merge commits of its own)
+    # target_ahead as of last verification
   - source: fineract
     target: fineract
     # in_sync as of last verification
