@@ -17,15 +17,19 @@ The sync is strictly one-directional and default-branch only:
   changes. It is the read-only source of truth.
 - Only default branches are read and written. Other branches, tags, releases, issues, PRs and
   repo settings are out of scope.
-- The target is never force-pushed, so nothing committed in `codev-workshops` is destroyed by a
-  sync; a target that has drifted is reported, and reconciling it is a human decision.
+- The target is never force-pushed and its history is never rewritten, so nothing committed in
+  `codev-workshops` is destroyed by a sync.
+- A target that has commits of its own still gets the upstream changes: the source default
+  branch is *merged* into it, keeping both histories. Only a merge that actually conflicts is
+  escalated to a human — renaming/archiving a target is never part of a sync run.
 
 | Target vs. source default branch | `ff-only` (default) | `pr-on-diverge` |
 | --- | --- | --- |
 | identical | nothing | nothing |
 | target strictly behind | fast-forward push | fast-forward push |
-| target has its own commits too | skipped, reported | branch + PR in the target |
-| target ahead only | skipped, reported | skipped, reported |
+| target has its own commits too | merge source into the target default branch | merge source into the target default branch |
+| ...and that merge conflicts | skipped, reported | branch + PR in the target |
+| target ahead only | nothing to sync, reported | nothing to sync, reported |
 
 `sync: off` on a pair excludes it entirely.
 
@@ -49,7 +53,7 @@ pip install pyyaml
 
 scripts/sync_from_source.py status               # read-only classification of every pair
 scripts/sync_from_source.py apply --dry-run      # what a run would change
-scripts/sync_from_source.py apply                # fast-forward what is safe
+scripts/sync_from_source.py apply                # fast-forward or merge every behind target
 scripts/sync_from_source.py apply --create-missing   # also mirror repos under new_repos:
 scripts/sync_from_source.py discover             # find upstream renames / unmapped repos
 ```

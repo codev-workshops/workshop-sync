@@ -6,8 +6,10 @@ force-pushed, so lab-specific commits in codev-workshops cannot be lost.
 
 Subcommands
     status     classify every mapped pair (default; read-only)
-    apply      fast-forward the targets that are strictly behind; optionally
-               create and populate the repos listed under `new_repos:`
+    apply      bring every target's default branch up to date with its source: a
+               fast-forward where the target has no commits of its own, otherwise a
+               merge of the source default branch into it; optionally create and
+               populate the repos listed under `new_repos:`
     discover   re-fingerprint both orgs by root commit and report pairs that are
                missing from, or contradicted by, the map (catches upstream renames)
 
@@ -49,6 +51,10 @@ GIT_BASE = os.environ.get("SYNC_GITHUB_BASE", "https://github.com:443")
 MAP_PATH = Path(__file__).resolve().parent.parent / "catalog" / "sync-map.yaml"
 
 IN_SYNC, FAST_FORWARD, TARGET_AHEAD, DIVERGED = "in-sync", "fast-forward", "target-ahead", "diverged"
+
+
+class MergeConflict(RuntimeError):
+    """The source default branch does not merge cleanly into the target's."""
 
 
 class Tokens:
@@ -163,6 +169,25 @@ class Repo:
     def push_branch(self, sb: str, branch: str):
         git_auth(["push", "t", f"s/{sb}:refs/heads/{branch}"], self.tk.tgt, cwd=self.dir)
 
+    def merge(self, sb: str, tb: str) -> str:
+        """Merge the source default branch into a local copy of the target's.
+
+        Target-only commits survive: this is a merge, never a reset. Raises
+        MergeConflict and leaves no half-merged state when the histories collide.
+        """
+        run(["git", "checkout", "-q", "-B", "wsync-merge", f"t/{tb}"], cwd=self.dir)
+        ident = ["-c", "user.name=workshop-sync", "-c", "user.email=workshop-sync@codev-workshops"]
+        p = subprocess.run(["git", *ident, "merge", "--no-ff", f"s/{sb}",
+                            "-m", f"Merge {self.cfg['source_org']}/{self.source}@{sb} into {tb}"],
+                           cwd=self.dir, text=True, capture_output=True)
+        if p.returncode:
+            run(["git", "merge", "--abort"], cwd=self.dir, check=False)
+            raise MergeConflict(redact(p.stdout.strip() or p.stderr.strip()))
+        return run(["git", "rev-parse", "--short", "HEAD"], cwd=self.dir)
+
+    def push_head(self, tb: str):
+        git_auth(["push", "t", f"HEAD:refs/heads/{tb}"], self.tk.tgt, cwd=self.dir)
+
 
 def default_branch(org: str, repo: str, tk: Tokens) -> str:
     return api(f"repos/{org}/{repo}", token=tk.for_org(org))["default_branch"]
@@ -200,8 +225,9 @@ def open_sync_pr(cfg, res, tk, dry_run: bool) -> str:
         "base": res["tb"],
         "body": (f"Automated sync from `{cfg['source_org']}/{res['source']}@{res['sb']}`.\n\n"
                  f"- {res['ahead']} commit(s) only in the source\n"
-                 f"- {res['behind']} commit(s) only here (lab-specific work — resolve by hand)\n\n"
-                 "Merged by a facilitator; the sync job never force-pushes."),
+                 f"- {res['behind']} commit(s) only here\n\n"
+                 "The automated merge conflicts, so it needs a human resolution; the sync job "
+                 "never force-pushes."),
     }, token=tk.tgt)
     return pr["html_url"]
 
@@ -239,11 +265,29 @@ def cmd_apply(cfg, mp, tk, args):
                     res["repo"].push(res["sb"], res["tb"])
                     print(f"  pushed {res['ahead']} commit(s) -> {res['target']}")
                 changed.append(res)
-            elif res["state"] == DIVERGED and policy == "pr-on-diverge":
+            elif res["state"] == DIVERGED:
                 res["repo"].fetch("s", res["sb"], deep=True)
-                prs.append((res, open_sync_pr(cfg, res, tk, args.dry_run)))
-                print(f"  PR for {res['target']}: {prs[-1][1]}")
-            elif res["state"] in (DIVERGED, TARGET_AHEAD):
+                res["repo"].fetch("t", res["tb"], deep=True)
+                try:
+                    sha = res["repo"].merge(res["sb"], res["tb"])
+                except MergeConflict as exc:
+                    print(f"  CONFLICT merging into {res['target']}: "
+                          f"{str(exc).splitlines()[0][:120]}")
+                    if policy == "pr-on-diverge":
+                        prs.append((res, open_sync_pr(cfg, res, tk, args.dry_run)))
+                        print(f"  PR for human resolution: {prs[-1][1]}")
+                    else:
+                        skipped.append(res)
+                else:
+                    if args.dry_run:
+                        print(f"  DRY-RUN would merge {res['ahead']} commit(s) into "
+                              f"{res['target']} ({sha}), keeping its {res['behind']} own commit(s)")
+                    else:
+                        res["repo"].push_head(res["tb"])
+                        print(f"  merged {res['ahead']} commit(s) -> {res['target']} ({sha}), "
+                              f"kept its {res['behind']} own commit(s)")
+                    changed.append(res)
+            elif res["state"] == TARGET_AHEAD:
                 skipped.append(res)
         except Exception as exc:
             # One unpushable repo (branch protection, push protection, revoked scope)
@@ -259,7 +303,7 @@ def cmd_apply(cfg, mp, tk, args):
         print("== new repos ==")
         create_missing(cfg, mp, tk, args)
 
-    print(f"\nfast-forwarded: {len(changed)} | PRs: {len(prs)} | "
+    print(f"\nupdated: {len(changed)} | PRs: {len(prs)} | "
           f"left for review: {len(skipped)} | failed: {len(failed)}")
     for res in failed:
         print(f"  failed: {res['source']} -> {res['target']}")
