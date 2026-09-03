@@ -6,13 +6,18 @@
 # Pairs were established by SHARED GIT HISTORY (identical root commit), not by name:
 # the two orgs use different naming conventions, and several repos share a name while
 # having completely unrelated history (see `collisions` below). Never add a pair by
-# name alone — run `scripts/sync_from_source.py discover` to verify.
+# name alone. Since the imported upstream history was squashed out of the targets on
+# 2026-09-01, the pairs can no longer be re-derived from a root commit either: this
+# file is the only record, and a new pair has to be confirmed by a human.
+#
+# The sync copies CONTENT, not history: the target default branch (plus main/develop
+# where both sides have them) gets one snapshot commit per run, recording the source
+# commit in an `Upstream-Commit:` trailer. Nothing else is read or written.
 #
 # sync policy per pair:
-#   ff-only        push only when the target is strictly behind the source default branch
-#                  (never a force push, so target-side lab commits can never be lost)
-#   pr-on-diverge  same, but when both sides moved, open a PR in the target instead
-#   off            never touch this repo
+#   ff-only / pr-on-diverge  synced normally (the historical names are kept so the map
+#                            does not need rewriting; both behave the same now)
+#   off                      never touch this repo
 #
 # Last verified: 2026-09-01
 

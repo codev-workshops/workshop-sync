@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Sync codev-workshops repos with their Cognition-Partner-Workshops sources.
 
-The source default branch is the reference for every decision. Nothing is ever
-force-pushed, so lab-specific commits in codev-workshops cannot be lost.
+Content, not history. A target repo has its own history made of *snapshot*
+commits; upstream commits are never copied into it. Each snapshot commit records
+the source commit it was taken from:
+
+    Upstream-Commit: <sha>
+
+which is the base for the next sync's three-way content merge, so target-side
+commits keep surviving without any shared ancestry between the two repos.
+
+Branch scope: the target's default branch, plus `main` and `develop` when they
+exist on both sides. Nothing else is ever read or written.
 
 Subcommands
     status     classify every mapped pair (default; read-only)
-    apply      bring every target's default branch up to date with its source: a
-               fast-forward where the target has no commits of its own, otherwise a
-               merge of the source default branch into it; optionally create and
-               populate the repos listed under `new_repos:`
-    discover   re-fingerprint both orgs by root commit and report pairs that are
-               missing from, or contradicted by, the map (catches upstream renames)
+    apply      merge the current source content into every synced target branch
+    squash     one-time: replace a target branch's history with a single snapshot
+               commit of its current content (force push; --yes required)
+    discover   re-fingerprint both orgs and report pairs missing from the map
 
 Auth
     GITHUB_MIRROR_PAT  fine-grained PAT (Contents+Administration write on the target
@@ -23,7 +30,7 @@ Examples
     scripts/sync_from_source.py status
     scripts/sync_from_source.py apply --dry-run
     scripts/sync_from_source.py apply --only=timesheet-app
-    scripts/sync_from_source.py apply --create-missing
+    scripts/sync_from_source.py squash --only=calcom --yes
     scripts/sync_from_source.py discover
 """
 from __future__ import annotations
@@ -50,11 +57,16 @@ API = "https://api.github.com"
 GIT_BASE = os.environ.get("SYNC_GITHUB_BASE", "https://github.com:443")
 MAP_PATH = Path(__file__).resolve().parent.parent / "catalog" / "sync-map.yaml"
 
-IN_SYNC, FAST_FORWARD, TARGET_AHEAD, DIVERGED = "in-sync", "fast-forward", "target-ahead", "diverged"
+# Besides the default branch, only these may be synced.
+EXTRA_BRANCHES = ("main", "develop")
+TRAILER = "Upstream-Commit:"
+
+IN_SYNC, UPDATE, UNSQUASHED = "in-sync", "update", "no-snapshot"
+IDENT = ["-c", "user.name=workshop-sync", "-c", "user.email=workshop-sync@codev-workshops"]
 
 
 class MergeConflict(RuntimeError):
-    """The source default branch does not merge cleanly into the target's."""
+    """The source content does not merge cleanly into the target branch."""
 
 
 class Tokens:
@@ -117,8 +129,10 @@ def redact(text: str) -> str:
     return re.sub(r"\b(github_pat_|ghp_|gho_|ghs_)\w+", r"\1***", text)
 
 
-def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> str:
-    p = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+def run(cmd: list[str], cwd: Path | None = None, check: bool = True,
+        env: dict | None = None) -> str:
+    p = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True,
+                       env={**os.environ, **env} if env else None)
     if check and p.returncode:
         raise RuntimeError(redact(f"{' '.join(cmd)}\n{p.stderr.strip()}"))
     return p.stdout.strip()
@@ -141,7 +155,12 @@ def git_auth(argv: list[str], token: str, cwd: Path | None = None) -> str:
 
 
 class Repo:
-    """A throwaway working copy holding both sides' commit graphs (blobless/treeless)."""
+    """A throwaway working copy holding the three trees a sync needs, and no history.
+
+    Source commits are fetched with `--depth=1` (one tree, no ancestry), the target
+    branch with `--filter=tree:0` (its own snapshot chain, trees on demand). A 1 GB
+    upstream history is therefore never downloaded, let alone copied over.
+    """
 
     def __init__(self, cfg, source: str, target: str, tk: "Tokens"):
         self.cfg, self.source, self.target, self.tk = cfg, source, target, tk
@@ -153,44 +172,98 @@ class Repo:
     def close(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def fetch(self, remote: str, branch: str, deep: bool = False):
-        flt = [] if deep else ["--filter=tree:0"]
+    def fetch(self, remote: str, ref: str, history: bool = False) -> str:
+        """Fetch a commit and return its sha; `history` keeps the (treeless) commit chain."""
         token = self.tk.src if remote == "s" else self.tk.tgt
-        git_auth(["fetch", "-q", *flt, remote, branch], token, cwd=self.dir)
+        flt = ["--filter=tree:0"] if history else ["--depth=1"]
+        git_auth(["fetch", "-q", *flt, remote, ref], token, cwd=self.dir)
+        return run(["git", "rev-parse", "FETCH_HEAD"], cwd=self.dir)
 
-    def counts(self, sb: str, tb: str) -> tuple[int, int]:
-        ahead = int(run(["git", "rev-list", "--count", f"t/{tb}..s/{sb}"], cwd=self.dir))
-        behind = int(run(["git", "rev-list", "--count", f"s/{sb}..t/{tb}"], cwd=self.dir))
-        return ahead, behind
+    def branches(self, remote: str) -> list[str]:
+        token = self.tk.src if remote == "s" else self.tk.tgt
+        out = git_auth(["ls-remote", "--heads", remote], token, cwd=self.dir)
+        return [line.split("refs/heads/")[-1] for line in out.splitlines() if line]
 
-    def push(self, sb: str, tb: str):
-        git_auth(["push", "t", f"s/{sb}:refs/heads/{tb}"], self.tk.tgt, cwd=self.dir)
+    def upstream_base(self, sha: str) -> str | None:
+        """Source commit recorded by the newest snapshot commit reachable from `sha`.
 
-    def push_branch(self, sb: str, branch: str):
-        git_auth(["push", "t", f"s/{sb}:refs/heads/{branch}"], self.tk.tgt, cwd=self.dir)
-
-    def merge(self, sb: str, tb: str) -> str:
-        """Merge the source default branch into a local copy of the target's.
-
-        Target-only commits survive: this is a merge, never a reset. Raises
-        MergeConflict and leaves no half-merged state when the histories collide.
+        Commits pushed by humans on top of a snapshot are expected, so the whole
+        target branch is searched, newest first, not just its head.
         """
-        run(["git", "checkout", "-q", "-B", "wsync-merge", f"t/{tb}"], cwd=self.dir)
-        ident = ["-c", "user.name=workshop-sync", "-c", "user.email=workshop-sync@codev-workshops"]
-        p = subprocess.run(["git", *ident, "merge", "--no-ff", f"s/{sb}",
-                            "-m", f"Merge {self.cfg['source_org']}/{self.source}@{sb} into {tb}"],
-                           cwd=self.dir, text=True, capture_output=True)
-        if p.returncode:
-            run(["git", "merge", "--abort"], cwd=self.dir, check=False)
-            raise MergeConflict(redact(p.stdout.strip() or p.stderr.strip()))
-        return run(["git", "rev-parse", "--short", "HEAD"], cwd=self.dir)
+        log = run(["git", "log", "--format=%B%x01", sha], cwd=self.dir)
+        for body in log.split("\x01"):
+            for line in reversed(body.splitlines()):
+                if line.startswith(TRAILER):
+                    return line.split(":", 1)[1].strip()
+        return None
 
-    def push_head(self, tb: str):
-        git_auth(["push", "t", f"HEAD:refs/heads/{tb}"], self.tk.tgt, cwd=self.dir)
+    def tree(self, sha: str) -> str:
+        return run(["git", "rev-parse", f"{sha}^{{tree}}"], cwd=self.dir)
+
+    def merge_trees(self, base: str, ours: str, theirs: str) -> str:
+        """Three-way merge of three unrelated trees; returns the merged tree sha.
+
+        `read-tree -m` plus `merge-index` (git's `resolve` strategy) needs no common
+        ancestor, which is the point: the two repos share no commits. It runs against
+        a scratch index and work tree, so several branches can be merged in one clone.
+        """
+        scratch = Path(tempfile.mkdtemp(prefix="merge-"))
+        env = {"GIT_DIR": str(self.dir / ".git"), "GIT_WORK_TREE": str(scratch),
+               "GIT_INDEX_FILE": str(scratch / ".idx")}
+        try:
+            run(["git", "read-tree", "-m", "-u", base, ours, theirs], cwd=scratch, env=env)
+            p = subprocess.run(["git", "merge-index", "-o", "git-merge-one-file", "-a"],
+                               cwd=scratch, text=True, capture_output=True,
+                               env={**os.environ, **env})
+            if p.returncode:
+                raise MergeConflict(redact(p.stdout.strip() or p.stderr.strip()))
+            try:
+                return run(["git", "write-tree"], cwd=scratch, env=env)
+            except RuntimeError as exc:
+                raise MergeConflict(redact(str(exc))) from exc
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def snapshot(self, tree: str, upstream: str, branch: str, parent: str | None) -> str:
+        """Commit `tree` as a snapshot of the source, optionally on top of `parent`."""
+        msg = (f"Sync content from {self.cfg['source_org']}/{self.source}@{branch}\n\n"
+               f"Source content only; upstream history is not copied.\n\n"
+               f"{TRAILER} {upstream}\n")
+        cmd = ["git", *IDENT, "commit-tree", tree, "-m", msg]
+        if parent:
+            cmd += ["-p", parent]
+        return run(cmd, cwd=self.dir)
+
+    def push(self, sha: str, branch: str, force: bool = False):
+        ref = f"{'+' if force else ''}{sha}:refs/heads/{branch}"
+        git_auth(["push", "t", ref], self.tk.tgt, cwd=self.dir)
 
 
 def default_branch(org: str, repo: str, tk: Tokens) -> str:
     return api(f"repos/{org}/{repo}", token=tk.for_org(org))["default_branch"]
+
+
+def synced_branches(r: Repo, sb_default: str, tb_default: str) -> list[tuple[str, str]]:
+    """(source branch, target branch) pairs in scope: the default plus main/develop."""
+    pairs = [(sb_default, tb_default)]
+    src, tgt = set(r.branches("s")), set(r.branches("t"))
+    for b in EXTRA_BRANCHES:
+        if b not in (sb_default, tb_default) and b in src and b in tgt:
+            pairs.append((b, b))
+    return pairs
+
+
+def classify_branch(r: Repo, sb: str, tb: str) -> dict:
+    src = r.fetch("s", sb)
+    tgt = r.fetch("t", tb, history=True)
+    base = r.upstream_base(tgt)
+    if base is None:
+        state = UNSQUASHED
+    elif base == src or r.tree(src) == r.tree(tgt):
+        state = IN_SYNC
+    else:
+        state = UPDATE
+    return dict(sb=sb, tb=tb, src=src, tgt=tgt, base=base, state=state)
 
 
 def classify(cfg, pair, tk) -> dict:
@@ -199,37 +272,18 @@ def classify(cfg, pair, tk) -> dict:
     try:
         sb = default_branch(cfg["source_org"], source, tk)
         tb = default_branch(cfg["target_org"], target, tk)
-        r.fetch("s", sb)
-        r.fetch("t", tb)
-        ahead, behind = r.counts(sb, tb)
-        state = (IN_SYNC if ahead == behind == 0 else
-                 FAST_FORWARD if behind == 0 else
-                 TARGET_AHEAD if ahead == 0 else DIVERGED)
-        return dict(source=source, target=target, sb=sb, tb=tb, ahead=ahead, behind=behind,
-                    state=state, repo=r)
+        branches = [classify_branch(r, s, t) for s, t in synced_branches(r, sb, tb)]
+        return dict(source=source, target=target, branches=branches, repo=r, error="")
     except Exception as exc:
         r.close()
-        return dict(source=source, target=target, sb="?", tb="?", ahead=0, behind=0,
-                    state=f"error: {redact(str(exc))}".splitlines()[-1][:120], repo=None)
+        return dict(source=source, target=target, branches=[], repo=None,
+                    error=f"{redact(str(exc))}".splitlines()[-1][:160])
 
 
-def open_sync_pr(cfg, res, tk, dry_run: bool) -> str:
-    import datetime
-    branch = f"sync/{datetime.date.today().isoformat()}"
-    if dry_run:
-        return f"would open PR from `{branch}`"
-    res["repo"].push_branch(res["sb"], branch)
-    pr = api(f"repos/{cfg['target_org']}/{res['target']}/pulls", "POST", {
-        "title": f"Sync {res['ahead']} commit(s) from {cfg['source_org']}/{res['source']}",
-        "head": branch,
-        "base": res["tb"],
-        "body": (f"Automated sync from `{cfg['source_org']}/{res['source']}@{res['sb']}`.\n\n"
-                 f"- {res['ahead']} commit(s) only in the source\n"
-                 f"- {res['behind']} commit(s) only here\n\n"
-                 "The automated merge conflicts, so it needs a human resolution; the sync job "
-                 "never force-pushes."),
-    }, token=tk.tgt)
-    return pr["html_url"]
+def describe(res) -> str:
+    if res["error"]:
+        return f"error: {res['error']}"
+    return ", ".join(f"{b['tb']}={b['state']}" for b in res["branches"])
 
 
 def cmd_status(cfg, mp, tk, args) -> list[dict]:
@@ -240,8 +294,7 @@ def cmd_status(cfg, mp, tk, args) -> list[dict]:
             continue
         res = classify(cfg, pair, tk)
         results.append(res)
-        print(f"  {res['state']:<12} {res['source']} -> {res['target']}"
-              f"  (+{res['ahead']} source / +{res['behind']} target)", flush=True)
+        print(f"  {res['source']} -> {res['target']}: {describe(res)}", flush=True)
         if res["repo"] and not args.keep:
             res["repo"].close()
             res["repo"] = None
@@ -249,51 +302,42 @@ def cmd_status(cfg, mp, tk, args) -> list[dict]:
 
 
 def cmd_apply(cfg, mp, tk, args):
-    print("== existing pairs ==")
     args.keep = True
     results = cmd_status(cfg, mp, tk, args)
-    changed, prs, skipped, failed = [], [], [], []
+    changed, conflicts, pending, failed = [], [], [], []
     for res in results:
-        pair = next(p for p in mp["pairs"] if p["source"] == res["source"] and p["target"] == res["target"])
-        policy = pair.get("sync", cfg["sync"])
+        if res["error"]:
+            failed.append((res, res["error"]))
+            continue
         try:
-            if res["state"] == FAST_FORWARD:
-                if args.dry_run:
-                    print(f"  DRY-RUN would fast-forward {res['target']} by {res['ahead']} commit(s)")
-                else:
-                    res["repo"].fetch("s", res["sb"], deep=True)
-                    res["repo"].push(res["sb"], res["tb"])
-                    print(f"  pushed {res['ahead']} commit(s) -> {res['target']}")
-                changed.append(res)
-            elif res["state"] == DIVERGED:
-                res["repo"].fetch("s", res["sb"], deep=True)
-                res["repo"].fetch("t", res["tb"], deep=True)
+            for b in res["branches"]:
+                label = f"{res['target']}@{b['tb']}"
+                if b["state"] == IN_SYNC:
+                    continue
+                if b["state"] == UNSQUASHED:
+                    pending.append((res, b))
+                    print(f"  {label}: no {TRAILER} snapshot marker — run `squash` first")
+                    continue
+                r: Repo = res["repo"]
+                r.fetch("s", b["base"])
                 try:
-                    sha = res["repo"].merge(res["sb"], res["tb"])
+                    tree = r.merge_trees(r.tree(b["base"]), r.tree(b["tgt"]), r.tree(b["src"]))
                 except MergeConflict as exc:
-                    print(f"  CONFLICT merging into {res['target']}: "
-                          f"{str(exc).splitlines()[0][:120]}")
-                    if policy == "pr-on-diverge":
-                        prs.append((res, open_sync_pr(cfg, res, tk, args.dry_run)))
-                        print(f"  PR for human resolution: {prs[-1][1]}")
-                    else:
-                        skipped.append(res)
+                    conflicts.append((res, b))
+                    print(f"  {label}: CONFLICT {str(exc).splitlines()[0][:120]}")
+                    continue
+                if args.dry_run:
+                    print(f"  {label}: DRY-RUN would snapshot {b['src'][:8]}")
                 else:
-                    if args.dry_run:
-                        print(f"  DRY-RUN would merge {res['ahead']} commit(s) into "
-                              f"{res['target']} ({sha}), keeping its {res['behind']} own commit(s)")
-                    else:
-                        res["repo"].push_head(res["tb"])
-                        print(f"  merged {res['ahead']} commit(s) -> {res['target']} ({sha}), "
-                              f"kept its {res['behind']} own commit(s)")
-                    changed.append(res)
-            elif res["state"] == TARGET_AHEAD:
-                skipped.append(res)
+                    sha = r.snapshot(tree, b["src"], b["sb"], parent=b["tgt"])
+                    r.push(sha, b["tb"])
+                    print(f"  {label}: snapshot {sha[:8]} <- {b['src'][:8]}")
+                changed.append((res, b))
         except Exception as exc:
             # One unpushable repo (branch protection, push protection, revoked scope)
             # must never abort the rest of the run.
-            failed.append(res)
-            print(f"  FAILED {res['target']}: {redact(str(exc)).splitlines()[-1][:200]}")
+            failed.append((res, redact(str(exc)).splitlines()[-1][:200]))
+            print(f"  FAILED {res['target']}: {failed[-1][1]}")
         finally:
             if res["repo"]:
                 res["repo"].close()
@@ -303,10 +347,56 @@ def cmd_apply(cfg, mp, tk, args):
         print("== new repos ==")
         create_missing(cfg, mp, tk, args)
 
-    print(f"\nupdated: {len(changed)} | PRs: {len(prs)} | "
-          f"left for review: {len(skipped)} | failed: {len(failed)}")
-    for res in failed:
-        print(f"  failed: {res['source']} -> {res['target']}")
+    print(f"\nupdated: {len(changed)} | conflicts: {len(conflicts)} | "
+          f"awaiting squash: {len(pending)} | failed: {len(failed)}")
+    for res, b in conflicts:
+        print(f"  conflict: {res['source']} -> {res['target']}@{b['tb']}")
+    for res, why in failed:
+        print(f"  failed: {res['source']} -> {res['target']}: {why}")
+
+
+def cmd_squash(cfg, mp, tk, args):
+    """Drop imported upstream history: one snapshot commit of the target's own content.
+
+    The tree comes from the *target*, so everything committed in codev-workshops
+    (lab work, merges) is kept; only the commit history is discarded. The current
+    source commit is recorded as the base for future three-way merges.
+    """
+    if not args.yes and not args.dry_run:
+        sys.exit("squash rewrites target history irreversibly: pass --yes (or --dry-run)")
+    pairs = [p for p in mp["pairs"] if not args.only or args.only in (p["source"], p["target"])]
+    done, failed = [], []
+    for pair in pairs:
+        if pair.get("sync", cfg["sync"]) == "off":
+            continue
+        source, target = pair["source"], pair["target"]
+        r = Repo(cfg, source, target, tk)
+        try:
+            sb = default_branch(cfg["source_org"], source, tk)
+            tb = default_branch(cfg["target_org"], target, tk)
+            for s, t in synced_branches(r, sb, tb):
+                src = r.fetch("s", s)
+                tgt = r.fetch("t", t, history=True)
+                if r.upstream_base(tgt) and not args.again:
+                    print(f"  {target}@{t}: already a snapshot, skipping")
+                    continue
+                if args.dry_run:
+                    print(f"  {target}@{t}: DRY-RUN would replace history with a snapshot "
+                          f"of {tgt[:8]} (base {src[:8]})")
+                    continue
+                sha = r.snapshot(r.tree(tgt), src, s, parent=None)
+                r.push(sha, t, force=True)
+                print(f"  {target}@{t}: history replaced by {sha[:8]} (content of {tgt[:8]}, "
+                      f"base {src[:8]})", flush=True)
+                done.append((target, t))
+        except Exception as exc:
+            failed.append((target, redact(str(exc)).splitlines()[-1][:200]))
+            print(f"  FAILED {target}: {failed[-1][1]}", flush=True)
+        finally:
+            r.close()
+    print(f"\nsquashed: {len(done)} | failed: {len(failed)}")
+    for target, why in failed:
+        print(f"  failed: {target}: {why}")
 
 
 def create_missing(cfg, mp, tk, args):
@@ -320,51 +410,48 @@ def create_missing(cfg, mp, tk, args):
         if args.only and args.only not in (source, target):
             continue
         if args.dry_run:
-            print(f"  DRY-RUN would mirror {source} -> {cfg['target_org']}/{target}"
+            print(f"  DRY-RUN would snapshot {source} -> {cfg['target_org']}/{target}"
                   + (" (existing empty repo)" if target in existing else " (new repo)"))
             continue
         if target not in existing:
             src_meta = api(f"repos/{cfg['source_org']}/{source}", token=tk.for_org(cfg["source_org"]))
             api(f"orgs/{cfg['target_org']}/repos", "POST", {
                 "name": target,
-                "description": f"Mirror of {cfg['source_org']}/{source}",
+                "description": f"Content snapshot of {cfg['source_org']}/{source}",
                 "private": src_meta["private"],
                 "auto_init": False,
             }, token=tk.tgt)
         try:
-            mirror(cfg, source, target, tk)
-            print(f"  mirrored {source} -> {target}")
+            seed(cfg, source, target, tk)
+            print(f"  seeded {source} -> {target}")
         except Exception as exc:
             print(f"  FAILED {source} -> {target}: "
                   f"{redact(str(exc)).splitlines()[-1][:200]}")
 
 
-def mirror(cfg, source: str, target: str, tk: Tokens):
-    """Copy every branch and tag into the (empty) target repo.
+def seed(cfg, source: str, target: str, tk: Tokens):
+    """Populate an empty target with one snapshot commit of the source default branch.
 
-    Branches and tags only: `--mirror` would also try to write `refs/pull/*`,
-    which GitHub rejects as hidden refs.
+    No upstream history and no branch other than the default is copied.
 
     A token without the Workflows permission cannot push commits that touch
-    `.github/workflows/`, so that failure is reported rather than worked around
-    by rewriting history.
+    `.github/workflows/`, so that failure is reported rather than worked around.
     """
-    work = Path(tempfile.mkdtemp(prefix="wmirror-"))
+    r = Repo(cfg, source, target, tk)
     try:
-        git_auth(["clone", "-q", "--mirror",
-                  f"{GIT_BASE}/{cfg['source_org']}/{source}", str(work / "src.git")], tk.src)
+        sb = default_branch(cfg["source_org"], source, tk)
+        src = r.fetch("s", sb)
+        sha = r.snapshot(r.tree(src), src, sb, parent=None)
         try:
-            git_auth(["push", f"{GIT_BASE}/{cfg['target_org']}/{target}",
-                      "refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"],
-                     tk.tgt, cwd=work / "src.git")
+            r.push(sha, sb)
         except RuntimeError as exc:
             if "workflow" in str(exc).lower():
                 raise RuntimeError(
-                    f"{source}: history contains .github/workflows/ — the token needs the "
-                    "Workflows permission to mirror this repo") from exc
+                    f"{source}: content includes .github/workflows/ — the token needs the "
+                    "Workflows permission to push it") from exc
             raise
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        r.close()
 
 
 def root_commit(org: str, repo: str, token: str) -> str | None:
@@ -393,7 +480,6 @@ def cmd_discover(cfg, mp, tk, args):
     src = {r["name"] for r in api_all(f"orgs/{cfg['source_org']}/repos?type=all", tk.src)}
     tgt = {r["name"] for r in api_all(f"orgs/{cfg['target_org']}/repos?type=all", tk.tgt)}
     mapped_src = {p["source"] for p in mp["pairs"]} | {e["source"] for e in mp.get("new_repos") or []}
-    mapped_tgt = {p["target"] for p in mp["pairs"]}
 
     gone = mapped_src - src
     if gone:
@@ -403,27 +489,25 @@ def cmd_discover(cfg, mp, tk, args):
 
     unmapped = sorted(src - mapped_src)
     if unmapped:
-        print("\nsource repos missing from the map — matching by root commit:")
-        roots = {}
-        for t in sorted(tgt - mapped_tgt):
-            r = root_commit(cfg["target_org"], t, tk.tgt)
-            if r:
-                roots.setdefault(r, []).append(t)
+        print("\nsource repos missing from the map:")
         for s in unmapped:
-            r = root_commit(cfg["source_org"], s, tk.src)
-            match = roots.get(r or "", [])
-            print(f"  - {s}: " + (f"shares history with {', '.join(match)}" if match
-                                  else "no counterpart -> add under new_repos:"))
+            hint = "same name exists in the target — verify by content, never assume" \
+                if s in tgt else "no counterpart -> add under new_repos:"
+            print(f"  - {s}: {hint}")
     if not gone and not unmapped:
         print("map is complete: every source repo is either paired or listed under new_repos")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", nargs="?", default="status", choices=["status", "apply", "discover"])
-    ap.add_argument("--dry-run", action="store_true", help="apply: report what would change, change nothing")
+    ap.add_argument("command", nargs="?", default="status",
+                    choices=["status", "apply", "squash", "discover"])
+    ap.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     ap.add_argument("--only", help="restrict to one repo (source or target name)")
-    ap.add_argument("--create-missing", action="store_true", help="apply: also create/populate new_repos")
+    ap.add_argument("--create-missing", action="store_true", help="apply: also create/seed new_repos")
+    ap.add_argument("--yes", action="store_true", help="squash: confirm the irreversible rewrite")
+    ap.add_argument("--again", action="store_true",
+                    help="squash: re-squash branches that already have a snapshot marker")
     ap.add_argument("--map", default=str(MAP_PATH))
     args = ap.parse_args()
     args.keep = False
@@ -431,7 +515,8 @@ def main():
     mp = yaml.safe_load(open(args.map))
     cfg = mp["defaults"]
     tk = Tokens(cfg)
-    {"status": cmd_status, "apply": cmd_apply, "discover": cmd_discover}[args.command](cfg, mp, tk, args)
+    {"status": cmd_status, "apply": cmd_apply, "squash": cmd_squash,
+     "discover": cmd_discover}[args.command](cfg, mp, tk, args)
 
 
 if __name__ == "__main__":
