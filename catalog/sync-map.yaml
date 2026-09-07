@@ -19,7 +19,7 @@
 #                            does not need rewriting; both behave the same now)
 #   off                      never touch this repo
 #
-# Last verified: 2026-09-01
+# Last verified: 2026-09-07
 
 defaults:
   source_org: Cognition-Partner-Workshops
@@ -309,7 +309,11 @@ pairs:
 
 # Source repos with no counterpart in codev-workshops. With `new_repos: mirror` these
 # are created and populated on the next run, then moved into `pairs:`.
-new_repos: []
+new_repos:
+  # discovered 2026-09-07; not yet seeded (needs GITHUB_MIRROR_PAT + --create-missing)
+  - source: dbx-legacy-enterprise-data-platform
+  - source: dbx-migration-plugin
+  - source: redshift-to-databricks-migration
 
 
 # Same name in both orgs, completely different history. Documented so nobody ever
