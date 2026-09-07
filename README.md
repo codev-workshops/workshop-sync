@@ -132,6 +132,36 @@ involved (Slack, Stripe, an Azure AD app secret in `eventflow-storefront`'s `pub
 AWS keys in NodeGoat's vendored `node_modules`) live in the *source* history and should be
 rotated there.
 
+## Pruning stale branches
+
+[`scripts/prune_branches.py`](scripts/prune_branches.py) deletes unused branches across every
+non-archived `codev-workshops` repo. A bi-weekly Devin automation (every other Saturday,
+22:00) runs it.
+
+Rules, in order:
+
+- **Never deleted:** the repo's default branch, `main`, `develop` (and `master`), anything under
+  a GitHub branch protection rule, extra names passed with `--protect`.
+- **Never deleted while the head of an open PR.** If no available token can list a repo's PRs,
+  its branches are held rather than deleted.
+- **Devin branches** (`devin/...` name, or tip commit authored/committed by a `devin` identity)
+  are deleted when the tip commit is more than **30 days** old.
+- **Any other branch** is deleted when the tip commit is more than **90 days** old.
+
+"Age" is the tip commit's committer date — a branch is kept alive by pushing to it.
+
+```bash
+scripts/prune_branches.py                       # dry run: report only
+scripts/prune_branches.py --apply               # actually delete
+scripts/prune_branches.py --repo angular2-hn    # one repo
+scripts/prune_branches.py --json report.json    # per-branch report
+```
+
+Credentials: `GITHUB_MIRROR_PAT` (Contents: write, plus Pull requests: read so open PRs can be
+seen) is used for deletion; any ambient token (`GH_TOKEN`, `gh auth token`) is tried as a
+read fallback for the PR check. Deletion failures are reported per branch and make the run
+exit non-zero.
+
 ## Maintenance
 
 `discover` reports source repos that are absent from the map and, for each, whether some
