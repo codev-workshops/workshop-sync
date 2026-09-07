@@ -311,9 +311,9 @@ pairs:
 # are created and populated on the next run, then moved into `pairs:`.
 new_repos:
   # discovered 2026-09-07; not yet seeded (needs GITHUB_MIRROR_PAT + --create-missing)
-  - dbx-legacy-enterprise-data-platform
-  - dbx-migration-plugin
-  - redshift-to-databricks-migration
+  - source: dbx-legacy-enterprise-data-platform
+  - source: dbx-migration-plugin
+  - source: redshift-to-databricks-migration
 
 
 # Same name in both orgs, completely different history. Documented so nobody ever
