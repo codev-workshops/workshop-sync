@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -189,6 +190,15 @@ def classify(br: dict, default: str, protect: set[str], open_pr_heads: set[str] 
     return row
 
 
+def report_path(raw: str) -> Path:
+    """`--json` must stay inside the working directory."""
+    root = Path.cwd().resolve()
+    path = (root / raw).resolve()
+    if root not in (path, *path.parents):
+        sys.exit(f"--json must be a path under {root}")
+    return path
+
+
 def delete(gh: GitHub, org: str, row: dict) -> str:
     ref = urllib.parse.quote(row["branch"], safe="")
     try:
@@ -242,7 +252,7 @@ def main():
     print(f"\n{len(repos)} repos, {len(rows)} branches scanned: {mode} {len(to_delete)}, "
           f"held {len(held)} (open PR / PR status unknown), kept {len(rows) - len(to_delete) - len(held)}")
     if args.json:
-        with open(args.json, "w") as fh:
+        with open(report_path(args.json), "w") as fh:
             json.dump(dict(org=args.org, apply=args.apply, scanned_at=now.isoformat(), branches=rows), fh, indent=2)
     failed = [r for r in to_delete if r.get("result", "").startswith("failed")]
     sys.exit(1 if failed else 0)
