@@ -19,14 +19,19 @@ The sync is one-directional and copies *content*, never history:
   of snapshot commits. Upstream repos are ~3.5 GB of history that no workshop needs (`calcom`
   alone was 1 GB), and a snapshot keeps the working content identical without it.
 - **Branch scope: the target default branch, plus `main` and `develop` when they exist on both
-  sides.** No other branch is ever read or written; tags, releases, issues, PRs and repo
+  sides.** No other branch's content is ever read or synced; tags, releases, issues and repo
   settings are out of scope.
+- **Synced branches are never pushed to directly.** A run puts the merged snapshot on
+  `sync/upstream-<branch>` in the target and opens a pull request, so the default-branch
+  ruleset (PR + an approval from someone other than the last pusher) governs the sync too and a
+  human accepts every change.
 - **Target commits are preserved.** Each sync three-way merges the new upstream content against
   the previously recorded upstream content, so lab work committed in `codev-workshops` survives.
   Only a real content conflict is escalated to a human — renaming/archiving a target is never
   part of a sync run.
-- A sync only ever appends a commit to the target branch. The single exception is the one-time
-  `squash` command, which is what removed the imported upstream history in the first place.
+- A sync only ever appends a commit to a synced branch (through its PR); the only branch it
+  rewrites is its own `sync/upstream-*`. The single exception is the one-time `squash` command,
+  which is what removed the imported upstream history in the first place.
 
 ### How a snapshot sync works
 
@@ -40,14 +45,16 @@ Upstream-Commit: 05d54eb8…
 
 A run reads that marker from the target branch (`base`), fetches the current source commit
 (`theirs`, `--depth=1` — one tree, no history) and the target head (`ours`), and merges the
-three *trees*. The result is committed on top of the target head with a new marker. Because
-nothing is compared by commit ancestry, the two repos share no commits at all.
+three *trees*. The result is committed on top of the target head with a new marker, pushed to
+`sync/upstream-<branch>` and offered as a pull request. Because nothing is compared by commit
+ancestry, the two repos share no commits at all.
 
 | Target branch vs. source content | behaviour |
 | --- | --- |
 | marker matches the source commit, or trees identical | nothing |
 | source moved on | three-way merge of trees, one new commit appended |
 | the merge conflicts | reported for a human; nothing pushed |
+| a sync PR is already open for that branch | the branch is updated, the PR is reused |
 | no `Upstream-Commit:` marker anywhere in the branch | reported; run `squash` for that repo first |
 
 `sync: off` on a pair excludes it entirely.
@@ -92,14 +99,16 @@ pip install pyyaml
 
 scripts/sync_from_source.py status               # read-only classification of every pair
 scripts/sync_from_source.py apply --dry-run      # what a run would change
-scripts/sync_from_source.py apply                # snapshot the current source content
+scripts/sync_from_source.py apply                # open/refresh a sync PR per branch
 scripts/sync_from_source.py apply --create-missing   # also seed repos under new_repos:
 scripts/sync_from_source.py squash --yes         # one-time: drop imported upstream history
 scripts/sync_from_source.py discover             # find upstream renames / unmapped repos
 ```
 
-Credentials: reading the source org and pushing to existing targets works with any token
-that has contents access to both orgs (`gh auth login` is enough). Creating the repos under
+Credentials: reading the source org and opening sync PRs works with any token that has contents
+access to both orgs plus pull-request write on the target (`gh auth login` is enough). No
+bypass of the default-branch ruleset is needed, and the Devin GitHub App deliberately no longer
+has one — the sync's own PRs need a human approval like anyone else's. Creating the repos under
 `new_repos:` additionally needs `GITHUB_MIRROR_PAT` — a fine-grained PAT on
 `codev-workshops` with **Administration: write** and **Contents: write**, plus
 **Workflows: write** if the content includes `.github/workflows/`. `squash` needs a token that

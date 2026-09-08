@@ -11,11 +11,15 @@ which is the base for the next sync's three-way content merge, so target-side
 commits keep surviving without any shared ancestry between the two repos.
 
 Branch scope: the target's default branch, plus `main` and `develop` when they
-exist on both sides. Nothing else is ever read or written.
+exist on both sides. No other branch's content is ever read or synced.
+
+Nothing is ever pushed straight onto a synced branch: `apply` puts the merged
+snapshot on a `sync/upstream-<branch>` branch and opens a pull request, so the
+default-branch ruleset (PR + a peer approval) applies to the sync as well.
 
 Subcommands
     status     classify every mapped pair (default; read-only)
-    apply      merge the current source content into every synced target branch
+    apply      open a PR merging the current source content into every synced branch
     squash     one-time: replace a target branch's history with a single snapshot
                commit of its current content (force push; --yes required)
     discover   re-fingerprint both orgs and report pairs missing from the map
@@ -62,6 +66,8 @@ EXTRA_BRANCHES = ("main", "develop")
 TRAILER = "Upstream-Commit:"
 
 IN_SYNC, UPDATE, UNSQUASHED = "in-sync", "update", "no-snapshot"
+# Snapshots land here and reach the synced branch through a reviewed pull request.
+SYNC_BRANCH = "sync/upstream-{branch}"
 IDENT = ["-c", "user.name=workshop-sync", "-c", "user.email=workshop-sync@codev-workshops"]
 
 
@@ -83,6 +89,9 @@ class Tokens:
             sys.exit("No GitHub token: set GH_TOKEN/GITHUB_MIRROR_PAT or authenticate the gh CLI.")
         self.src = ambient or pat
         self.tgt = pat or ambient
+        # GITHUB_MIRROR_PAT only carries Contents+Administration, so it cannot open pull
+        # requests; the ambient (app) token can, and is used for that one call.
+        self.pulls = ambient or pat
         self.can_create = bool(pat)
         self._by_org = {cfg["source_org"]: self.src, cfg["target_org"]: self.tgt}
 
@@ -239,6 +248,23 @@ class Repo:
         git_auth(["push", "t", ref], self.tk.tgt, cwd=self.dir)
 
 
+def open_pr(cfg, target: str, head: str, base: str, source: str, src: str, tk: Tokens) -> str:
+    """Open (or reuse) the sync PR for one branch and return its url."""
+    org = cfg["target_org"]
+    existing = api(f"repos/{org}/{target}/pulls?state=open&head={org}:{head}&base={base}",
+                   token=tk.pulls)
+    if existing:
+        return existing[0]["html_url"]
+    body = (f"Content snapshot of `{cfg['source_org']}/{source}@{base}` at `{src}`, "
+            f"three-way merged with this branch's own content.\n\n"
+            f"Upstream history is not copied and no other branch is touched. "
+            f"Merge to accept; a conflicting merge is never pushed.\n")
+    pr = api(f"repos/{org}/{target}/pulls", "POST",
+             {"title": f"Sync content from {cfg['source_org']}/{source}@{base}",
+              "head": head, "base": base, "body": body}, token=tk.pulls)
+    return pr["html_url"]
+
+
 def default_branch(org: str, repo: str, tk: Tokens) -> str:
     return api(f"repos/{org}/{repo}", token=tk.for_org(org))["default_branch"]
 
@@ -327,11 +353,14 @@ def cmd_apply(cfg, mp, tk, args):
                     print(f"  {label}: CONFLICT {str(exc).splitlines()[0][:120]}")
                     continue
                 if args.dry_run:
-                    print(f"  {label}: DRY-RUN would snapshot {b['src'][:8]}")
+                    print(f"  {label}: DRY-RUN would open a PR with a snapshot of {b['src'][:8]}")
                 else:
                     sha = r.snapshot(tree, b["src"], b["sb"], parent=b["tgt"])
-                    r.push(sha, b["tb"])
-                    print(f"  {label}: snapshot {sha[:8]} <- {b['src'][:8]}")
+                    head = SYNC_BRANCH.format(branch=b["tb"])
+                    r.push(sha, head, force=True)
+                    url = open_pr(cfg, res["target"], head, b["tb"], res["source"],
+                                  b["src"], tk)
+                    print(f"  {label}: PR {url} (snapshot {sha[:8]} <- {b['src'][:8]})")
                 changed.append((res, b))
         except Exception as exc:
             # One unpushable repo (branch protection, push protection, revoked scope)
@@ -347,7 +376,7 @@ def cmd_apply(cfg, mp, tk, args):
         print("== new repos ==")
         create_missing(cfg, mp, tk, args)
 
-    print(f"\nupdated: {len(changed)} | conflicts: {len(conflicts)} | "
+    print(f"\nPRs open/updated: {len(changed)} | conflicts: {len(conflicts)} | "
           f"awaiting squash: {len(pending)} | failed: {len(failed)}")
     for res, b in conflicts:
         print(f"  conflict: {res['source']} -> {res['target']}@{b['tb']}")
