@@ -112,10 +112,29 @@ has one — the sync's own PRs need a human approval like anyone else's. Creatin
 `new_repos:` additionally needs `GITHUB_MIRROR_PAT` — a fine-grained PAT on
 `codev-workshops` with **Administration: write** and **Contents: write**, plus
 **Workflows: write** if the content includes `.github/workflows/`. `squash` needs a token that
-the default-branch ruleset lets force-push (org admin or the Devin app).
+the default-branch ruleset lets force-push, which now means an org-admin one.
 
 Set `SYNC_GITHUB_BASE=https://github.com` if your environment does not rewrite github.com
 through a credential proxy.
+
+## Default-branch protection
+
+[`scripts/apply_rulesets.py`](scripts/apply_rulesets.py) puts the same `protect-default-branch`
+ruleset on every non-archived `codev-workshops` repo — PR required, 1 approval, approval from
+someone other than the last pusher, no deletion, no non-fast-forward — with **org admins as the
+only bypass actor**. Run it after a new repo appears:
+
+```bash
+GITHUB_MIRROR_PAT=… scripts/apply_rulesets.py
+```
+
+It also strips `Integration` bypass actors. There used to be one for the Devin GitHub App (so
+the sync could push directly), and because bypass is ruleset-wide it let any Devin session merge
+into a default branch with zero reviews. That is why the sync goes through PRs now; never re-add
+an app as a bypass actor.
+
+Rulesets need GitHub Team on private repos: 20 private repos in the org answer
+`403 Upgrade to GitHub Pro or make this repository public` and are therefore unprotected.
 
 ## Push protection
 
