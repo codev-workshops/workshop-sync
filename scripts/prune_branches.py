@@ -4,8 +4,9 @@
 Rules (evaluated per branch, first match wins)
     keep     the repo default branch, `main`, `master`, `develop`, any name listed
              with --protect, and anything GitHub marks as protected
-    keep     branches that are the head of an open pull request (deleting them would
-             close the PR); reported so a human can decide
+    delete   heads of open pull requests with no activity for --pr-days (14): the PR is
+             commented on and closed, then the branch is deleted
+    keep     heads of other open pull requests; reported so a human can decide
     delete   Devin branches whose tip commit is older than --devin-days (30)
     delete   any other branch whose tip commit is older than --stale-days (90)
 
@@ -157,17 +158,28 @@ def scan_repo(gh: GitHub, org: str, repo: dict, args, now: datetime) -> list[dic
     default = repo["default_branch"]
     protect = ALWAYS_KEEP | set(args.protect) | {default}
     try:
-        open_pr_heads = {pr["head"]["ref"] for pr in gh.all_any_token(f"repos/{org}/{name}/pulls?state=open")}
+        open_prs = open_prs_by_head(gh.all_any_token(f"repos/{org}/{name}/pulls?state=open"), f"{org}/{name}", now)
     except PermissionError:
-        open_pr_heads = None
-    return [classify(br, default, protect, open_pr_heads, args.devin_days, args.stale_days, now) | {"repo": name}
+        open_prs = None
+    return [classify(br, default, protect, open_prs, args.devin_days, args.stale_days, args.pr_days, now) | {"repo": name}
             for br in branches(gh, org, name)]
 
 
-def classify(br: dict, default: str, protect: set[str], open_pr_heads: set[str] | None,
-             devin_days: int, stale_days: int, now: datetime) -> dict:
+def open_prs_by_head(pulls: list[dict], full_name: str, now: datetime) -> dict[str, list[dict]]:
+    """head branch -> [{number, idle_days}] for PRs whose head lives in this repo (not a fork)."""
+    out: dict[str, list[dict]] = {}
+    for pr in pulls:
+        head_repo = (pr["head"].get("repo") or {}).get("full_name")
+        updated = datetime.fromisoformat(pr["updated_at"].replace("Z", "+00:00"))
+        entry = dict(number=pr["number"], idle_days=(now - updated).days, same_repo=head_repo == full_name)
+        out.setdefault(pr["head"]["ref"], []).append(entry)
+    return out
+
+
+def classify(br: dict, default: str, protect: set[str], open_prs: dict[str, list[dict]] | None,
+             devin_days: int, stale_days: int, pr_days: int, now: datetime) -> dict:
     b = br["name"]
-    row = dict(branch=b, action="keep", reason="", age_days=None, devin=False)
+    row = dict(branch=b, action="keep", reason="", age_days=None, devin=False, close_prs=[])
     if b in protect:
         row["reason"] = "default branch" if b == default else "protected name"
     elif br.get("branchProtectionRule"):
@@ -179,10 +191,15 @@ def classify(br: dict, default: str, protect: set[str], open_pr_heads: set[str] 
         devin = is_devin(b, commit)
         limit = devin_days if devin else stale_days
         row.update(age_days=age, devin=devin)
-        if open_pr_heads is None:
+        if open_prs is None:
             row["reason"] = "open-PR status unknown (token cannot list PRs)"
-        elif b in open_pr_heads:
-            row["reason"] = "head of an open PR"
+        elif b in open_prs:
+            prs = open_prs[b]
+            if all(p["same_repo"] and p["idle_days"] > pr_days for p in prs):
+                row.update(action="delete", close_prs=[p["number"] for p in prs],
+                           reason="open PR " + ", ".join(f"#{p['number']} idle {p['idle_days']}d" for p in prs) + f" > {pr_days}d")
+            else:
+                row["reason"] = "head of an open PR"
         elif age > limit:
             row.update(action="delete", reason=f"{'devin' if devin else 'user'} branch idle {age}d > {limit}d")
         else:
@@ -199,9 +216,14 @@ def report_path(raw: str) -> Path:
     return path
 
 
-def delete(gh: GitHub, org: str, row: dict) -> str:
+def delete(gh: GitHub, org: str, row: dict, pr_days: int) -> str:
     ref = urllib.parse.quote(row["branch"], safe="")
     try:
+        for number in row.get("close_prs", []):
+            gh.call(f"repos/{org}/{row['repo']}/issues/{number}/comments", "POST",
+                    {"body": f"Closing: no activity for more than {pr_days} days. Branch `{row['branch']}` is being deleted; "
+                             "reopen from a fresh branch if this work is still wanted."})
+            gh.call(f"repos/{org}/{row['repo']}/pulls/{number}", "PATCH", {"state": "closed"})
         gh.call(f"repos/{org}/{row['repo']}/git/refs/heads/{ref}", "DELETE")
         return "deleted"
     except urllib.error.HTTPError as exc:
@@ -214,6 +236,7 @@ def main():
     ap.add_argument("--repo", action="append", default=[], help="limit to these repos (repeatable)")
     ap.add_argument("--devin-days", type=int, default=30)
     ap.add_argument("--stale-days", type=int, default=90)
+    ap.add_argument("--pr-days", type=int, default=14, help="close open PRs idle longer than this and delete their branch")
     ap.add_argument("--protect", action="append", default=[], help="extra branch names to keep (repeatable)")
     ap.add_argument("--apply", action="store_true", help="delete; without it only report")
     ap.add_argument("--json", help="write the full per-branch report here")
@@ -237,7 +260,7 @@ def main():
 
     to_delete = [r for r in rows if r["action"] == "delete"]
     for r in to_delete:
-        r["result"] = delete(gh, args.org, r) if args.apply else "dry-run"
+        r["result"] = delete(gh, args.org, r, args.pr_days) if args.apply else "dry-run"
         print(f"{r['result']:>9}  {r['repo']}:{r['branch']}  ({r['reason']})")
 
     held = [r for r in rows if r["action"] == "keep" and r["reason"].startswith(("head of an open PR", "open-PR status unknown"))

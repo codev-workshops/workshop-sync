@@ -170,8 +170,10 @@ Rules, in order:
 
 - **Never deleted:** the repo's default branch, `main`, `develop` (and `master`), anything under
   a GitHub branch protection rule, extra names passed with `--protect`.
-- **Never deleted while the head of an open PR.** If no available token can list a repo's PRs,
-  its branches are held rather than deleted.
+- **Open PRs idle for more than 14 days** (no update of any kind) are commented on and closed,
+  and their head branch is deleted. PRs from forks are left alone.
+- **Never deleted while the head of an active open PR.** If no available token can list a
+  repo's PRs, its branches are held rather than deleted.
 - **Devin branches** (`devin/...` name, or tip commit authored/committed by a `devin` identity)
   are deleted when the tip commit is more than **30 days** old.
 - **Any other branch** is deleted when the tip commit is more than **90 days** old.
@@ -183,10 +185,11 @@ scripts/prune_branches.py                       # dry run: report only
 scripts/prune_branches.py --apply               # actually delete
 scripts/prune_branches.py --repo angular2-hn    # one repo
 scripts/prune_branches.py --json report.json    # per-branch report
+scripts/prune_branches.py --pr-days 30          # be more lenient with idle PRs
 ```
 
-Credentials: `GITHUB_MIRROR_PAT` (Contents: write, plus Pull requests: read so open PRs can be
-seen) is used for deletion; any ambient token (`GH_TOKEN`, `gh auth token`) is tried as a
+Credentials: `GITHUB_MIRROR_PAT` (Contents: write, plus Pull requests: write so idle PRs can be
+listed and closed) is used for deletion; any ambient token (`GH_TOKEN`, `gh auth token`) is tried as a
 read fallback for the PR check. Deletion failures are reported per branch and make the run
 exit non-zero.
 
