@@ -13,12 +13,16 @@ commits keep surviving without any shared ancestry between the two repos.
 Branch scope: the target's default branch, plus `main` and `develop` when they
 exist on both sides. No other branch's content is ever read or synced.
 
-Nothing is ever pushed straight onto a synced branch: `apply` puts the merged
-snapshot on a `sync/upstream-<branch>` branch and opens a pull request, so the
-default-branch ruleset (PR + a peer approval) applies to the sync as well.
+By default `apply` puts the merged snapshot on a `sync/upstream-<branch>` branch
+and opens a pull request, so the default-branch ruleset (PR + a peer approval)
+applies to the sync as well.
 With `--auto-merge` the PR is merged right away using GITHUB_SYNC_BOT_PAT, the
 token of the dedicated `codev-sync-bot` account that the ruleset lets bypass;
 the PR stays as the audit trail and a merge that GitHub refuses is left open.
+With `--direct-push` (the scheduled automation's mode) the snapshot is instead
+pushed straight onto the synced branch with GITHUB_SYNC_BOT_PAT — a plain
+fast-forward on top of the branch head, never a force — and the PR route is only
+used as a fallback when GitHub refuses that push.
 
 Subcommands
     status     classify every mapped pair (default; read-only)
@@ -32,7 +36,7 @@ Auth
                        org). Required for `apply --create-missing`; optional otherwise.
     GITHUB_SYNC_BOT_PAT  fine-grained PAT of the `codev-sync-bot` machine user
                        (Contents+Pull requests write on the target org). Required
-                       for `apply --auto-merge`; never used for anything else.
+                       for `apply --auto-merge` / `--direct-push`; never used otherwise.
     Falls back to `gh auth token` for API calls and to ambient git credentials
     for pushes.
 
@@ -41,6 +45,7 @@ Examples
     scripts/sync_from_source.py apply --dry-run
     scripts/sync_from_source.py apply --only=timesheet-app
     scripts/sync_from_source.py apply --auto-merge
+    scripts/sync_from_source.py apply --direct-push --auto-merge
     scripts/sync_from_source.py squash --only=calcom --yes
     scripts/sync_from_source.py discover
 """
@@ -259,6 +264,16 @@ class Repo:
         ref = f"{'+' if force else ''}{sha}:refs/heads/{branch}"
         git_auth(["push", "t", ref], self.tk.tgt, cwd=self.dir)
 
+    def push_direct(self, sha: str, branch: str) -> str:
+        """Fast-forward `branch` to `sha` with the bot token only; '' or the refusal."""
+        try:
+            run(["git", *auth_header(self.tk.bot), "push", "t", f"{sha}:refs/heads/{branch}"],
+                cwd=self.dir)
+            return ""
+        except RuntimeError as exc:
+            lines = [l for l in redact(str(exc)).splitlines() if l.strip()]
+            return (lines[-1] if lines else "push refused")[:160]
+
 
 def open_pr(cfg, target: str, head: str, base: str, source: str, src: str, tk: Tokens) -> dict:
     """Open (or reuse) the sync PR for one branch and return it."""
@@ -361,10 +376,10 @@ def cmd_status(cfg, mp, tk, args) -> list[dict]:
 
 def cmd_apply(cfg, mp, tk, args):
     args.keep = True
-    if args.auto_merge and not tk.bot:
-        sys.exit("--auto-merge needs GITHUB_SYNC_BOT_PAT (the codev-sync-bot token).")
+    if (args.auto_merge or args.direct_push) and not tk.bot:
+        sys.exit("--auto-merge/--direct-push need GITHUB_SYNC_BOT_PAT (the sync bot token).")
     results = cmd_status(cfg, mp, tk, args)
-    changed, conflicts, pending, failed, merged, unmerged = [], [], [], [], [], []
+    changed, conflicts, pending, failed, merged, unmerged, pushed = [], [], [], [], [], [], []
     for res in results:
         if res["error"]:
             failed.append((res, res["error"]))
@@ -387,10 +402,19 @@ def cmd_apply(cfg, mp, tk, args):
                     print(f"  {label}: CONFLICT {str(exc).splitlines()[0][:120]}")
                     continue
                 if args.dry_run:
-                    how = "open and merge" if args.auto_merge else "open"
-                    print(f"  {label}: DRY-RUN would {how} a PR with a snapshot of {b['src'][:8]}")
+                    how = ("push directly" if args.direct_push
+                           else "open and merge a PR" if args.auto_merge else "open a PR")
+                    print(f"  {label}: DRY-RUN would {how} with a snapshot of {b['src'][:8]}")
                 else:
                     sha = r.snapshot(tree, b["src"], b["sb"], parent=b["tgt"])
+                    if args.direct_push:
+                        why = r.push_direct(sha, b["tb"])
+                        if not why:
+                            pushed.append((res, b, sha))
+                            print(f"  {label}: pushed {sha[:8]} <- {b['src'][:8]} onto {b['tb']}")
+                            changed.append((res, b))
+                            continue
+                        print(f"  {label}: direct push refused ({why}) — falling back to a PR")
                     head = SYNC_BRANCH.format(branch=b["tb"])
                     r.push(sha, head, force=True)
                     pr = open_pr(cfg, res["target"], head, b["tb"], res["source"],
@@ -420,9 +444,13 @@ def cmd_apply(cfg, mp, tk, args):
         print("== new repos ==")
         create_missing(cfg, mp, tk, args)
 
-    print(f"\nPRs open/updated: {len(changed)} | conflicts: {len(conflicts)} | "
+    print(f"\nupdated: {len(changed)} | conflicts: {len(conflicts)} | "
           f"awaiting squash: {len(pending)} | failed: {len(failed)}"
+          + (f" | pushed directly: {len(pushed)}" if args.direct_push else "")
           + (f" | merged: {len(merged)} | left open: {len(unmerged)}" if args.auto_merge else ""))
+    for res, b, sha in pushed:
+        print(f"  pushed: {res['target']}@{b['tb']} "
+              f"https://github.com/{cfg['target_org']}/{res['target']}/commit/{sha}")
     for res, b, url, why in unmerged:
         print(f"  left open: {res['target']}@{b['tb']} {url}: {why}")
     for res, b in conflicts:
@@ -583,6 +611,9 @@ def main():
     ap.add_argument("--create-missing", action="store_true", help="apply: also create/seed new_repos")
     ap.add_argument("--auto-merge", action="store_true",
                     help="apply: merge each sync PR immediately with GITHUB_SYNC_BOT_PAT")
+    ap.add_argument("--direct-push", action="store_true",
+                    help="apply: fast-forward the synced branch itself with GITHUB_SYNC_BOT_PAT; "
+                         "fall back to the PR route if GitHub refuses the push")
     ap.add_argument("--yes", action="store_true", help="squash: confirm the irreversible rewrite")
     ap.add_argument("--again", action="store_true",
                     help="squash: re-squash branches that already have a snapshot marker")
