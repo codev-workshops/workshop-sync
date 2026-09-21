@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -234,14 +235,23 @@ def load_repo(root: Path) -> tuple[dict[str, Module], dict[str, str]]:
     return modules, workshops
 
 
-SINCE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}|\d+ (hour|day|week|month)s? ago)$")
+UNIT_HOURS = {"hour": 1, "day": 24, "week": 24 * 7, "month": 24 * 30}
+
+
+def since_timestamp(since: str) -> str:
+    """'8 days ago' or '2026-01-31' -> ISO timestamp built from parsed numbers (never the raw string)."""
+    if m := re.fullmatch(r"(\d{1,4}) (hour|day|week|month)s? ago", since):
+        delta = timedelta(hours=int(m.group(1)) * UNIT_HOURS[m.group(2)])
+        return (datetime.now(timezone.utc) - delta).isoformat(timespec="seconds")
+    try:
+        return date.fromisoformat(since).isoformat()
+    except ValueError:
+        sys.exit(f"--since must look like '8 days ago' or 2026-01-31, got {since!r}")
 
 
 def git_changed_since(root: Path, since: str) -> list[str]:
-    if not SINCE_RE.match(since):
-        sys.exit(f"--since must look like '8 days ago' or 2026-01-31, got {since!r}")
     out = subprocess.run(
-        ["git", "log", f"--since={since}", "--name-only", "--format=", "--", "labs", "workshops"],
+        ["git", "log", "--since=" + since_timestamp(since), "--name-only", "--format=", "--", "labs", "workshops"],
         cwd=root, capture_output=True, text=True, check=True,
     ).stdout
     return sorted({l for l in out.splitlines() if l.strip()})
