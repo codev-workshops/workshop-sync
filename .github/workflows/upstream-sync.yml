@@ -60,7 +60,7 @@ jobs:
 
       - name: Install
         if: steps.gate.outputs.run == 'true'
-        run: pip install pyyaml
+        run: pip install --only-binary :all: pyyaml==6.0.2
 
       - name: Apply
         if: steps.gate.outputs.run == 'true'
@@ -68,11 +68,13 @@ jobs:
           GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_READ_PAT }}
           GITHUB_MIRROR_PAT: ${{ secrets.SYNC_MIRROR_PAT }}
           GITHUB_SYNC_BOT_PAT: ${{ secrets.SYNC_BOT_PAT }}
+          ONLY: ${{ inputs.only }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -o pipefail
           flags="--direct-push --auto-merge --create-missing --report report.json"
-          [ -n "${{ inputs.only }}" ] && flags="$flags --only=${{ inputs.only }}"
-          [ "${{ inputs.dry_run }}" = "true" ] && flags="$flags --dry-run"
+          [ -n "$ONLY" ] && flags="$flags --only=$ONLY"
+          [ "$DRY_RUN" = "true" ] && flags="$flags --dry-run"
           python scripts/sync_from_source.py apply $flags 2>&1 | tee apply.log
 
       - name: Discover
