@@ -122,6 +122,30 @@ class SnapshotTest(unittest.TestCase):
         files = S.run(["git", "ls-tree", "-r", "--name-only", tree], cwd=self.r.dir).split()
         self.assertNotIn("keep.txt", files)
 
+    def test_rewrite_org_references_makes_target_rewrite_merge_cleanly(self):
+        mp = {"pairs": [{"source": "otter"}, {"source": "src", "target": "tgt"}]}
+        rw = S.Rewrite(self.r.cfg, mp, ["org-references"])
+        self.assertEqual(rw.text(b"see SRC/otter and SRC/\notter, SRC org, /orgs/SRC, SRC/unmapped"),
+                         b"see TGT/otter and TGT/\notter, TGT org, /orgs/TGT, SRC/unmapped")
+        self.assertEqual(rw.text(b"SRC-lab SRCx"), b"SRC-lab SRCx")
+        png = b"\x89PNG\0SRC/otter"
+        self.assertEqual(rw.text(png), png)
+
+        # target hand-rewrote the org in a prompt; upstream then edited the same line
+        commit(self.src, {"a.txt": "clone SRC/otter now\n", "b.png": "x"})
+        src = self.r.fetch("s", "main")
+        commit(self.tgt, {"a.txt": "clone TGT/otter now\n", "b.png": "x"})
+        tgt = self.r.fetch("t", "main")
+        self.assertEqual(self.r.rewrite_tree(self.r.tree(src), rw), self.r.tree(tgt))
+        self.assertEqual(self.r.rewrite_tree(self.r.tree(src), S.Rewrite(self.r.cfg, mp, None)),
+                         self.r.tree(src))
+        new_src = commit(self.src, {"a.txt": "clone SRC/otter today\n"})
+        src2 = self.r.fetch("s", new_src)
+        tree = self.r.merge_trees(self.r.rewrite_tree(self.r.tree(src), rw), self.r.tree(tgt),
+                                  self.r.rewrite_tree(self.r.tree(src2), rw))
+        self.assertEqual(S.run(["git", "show", f"{tree}:a.txt"], cwd=self.r.dir),
+                         "clone TGT/otter today")
+
 
 class AutoMergeTest(unittest.TestCase):
     cfg = {"source_org": "SRC", "target_org": "TGT"}

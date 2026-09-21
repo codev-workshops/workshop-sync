@@ -19,7 +19,13 @@
 #                            does not need rewriting; both behave the same now)
 #   off                      never touch this repo
 #
-# Last verified: 2026-09-07
+# rewrite: (optional, per pair) textual rules applied to the SOURCE content before the
+# three-way merge, for targets that deliberately differ from upstream in a mechanical
+# way. `org-references` turns `Cognition-Partner-Workshops/<mapped repo>` (and bare
+# mentions of the source org) into `codev-workshops/<repo>`; `{from, to}` is a literal
+# replacement. Without it every upstream edit of such a line conflicts.
+#
+# Last verified: 2026-09-21
 
 defaults:
   source_org: Cognition-Partner-Workshops
@@ -221,6 +227,11 @@ pairs:
     # target-ahead; the tooling moved to codev-workshops/workshop-sync and the old repo was
     # archived as workshop-metadata-lab, so this is now a plain mirror
     # in_sync as of last verification
+    # attendee links must point at codev-workshops: the target rewrote them by hand in
+    # 148 files, so upstream edits of those lines conflicted (2026-09-21) until the
+    # rewrite became part of the sync
+    rewrite:
+      - org-references
 
   - source: ACC-demo-webapp
     target: ACC-demo-webapp
@@ -306,14 +317,35 @@ pairs:
   - source: uc-appsec-nodegoat
     target: uc-appsec-nodegoat
     # mirrored from source on 2026-09-01; in_sync as of last verification
+  - source: dbx-legacy-enterprise-data-platform
+    target: dbx-legacy-enterprise-data-platform
+    # seeded 2026-09-21 as a content snapshot
+  - source: redshift-to-databricks-migration
+    target: redshift-to-databricks-migration
+    # seeded 2026-09-21 as a content snapshot
+  - source: OtterWorksWithPartners
+    target: OtterWorksWithPartners
+    # seeded 2026-09-21 as a content snapshot
+  - source: ccm-migration-runbook
+    target: ccm-migration-runbook
+    # seeded 2026-09-21 as a content snapshot
+  - source: helios-pay
+    target: helios-pay
+    # seeded 2026-09-21 as a content snapshot
+  - source: uc-api-ehrbase
+    target: uc-api-ehrbase
+    # seeded 2026-09-21 as a content snapshot
+  - source: uc-reinsurance-workbench
+    target: uc-reinsurance-workbench
+    # seeded 2026-09-21 as a content snapshot
 
 # Source repos with no counterpart in codev-workshops. With `new_repos: mirror` these
 # are created and populated on the next run, then moved into `pairs:`.
 new_repos:
-  # discovered 2026-09-07; not yet seeded (needs GITHUB_MIRROR_PAT + --create-missing)
-  - source: dbx-legacy-enterprise-data-platform
+  # discovered 2026-09-07; seeding on 2026-09-21 blocked by GitHub push protection
+  # (Databricks API token in skills/factory-doctor/tests/test_doctor.py) — a human must
+  # allow it target-side via the unblock URL in the run log, then re-run --create-missing
   - source: dbx-migration-plugin
-  - source: redshift-to-databricks-migration
 
 
 # Same name in both orgs, completely different history. Documented so nobody ever
