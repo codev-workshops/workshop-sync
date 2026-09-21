@@ -19,7 +19,7 @@
 #                            does not need rewriting; both behave the same now)
 #   off                      never touch this repo
 #
-# Last verified: 2026-09-07
+# Last verified: 2026-09-21
 
 defaults:
   source_org: Cognition-Partner-Workshops
@@ -314,6 +314,12 @@ new_repos:
   - source: dbx-legacy-enterprise-data-platform
   - source: dbx-migration-plugin
   - source: redshift-to-databricks-migration
+  # discovered 2026-09-21; not yet seeded
+  - source: OtterWorksWithPartners
+  - source: ccm-migration-runbook
+  - source: helios-pay
+  - source: uc-api-ehrbase
+  - source: uc-reinsurance-workbench
 
 
 # Same name in both orgs, completely different history. Documented so nobody ever
