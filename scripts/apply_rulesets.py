@@ -4,7 +4,12 @@
 Same rules as the 92 sync targets: PR required, 1 approval, approval from someone
 other than the last pusher, no deletion, no non-fast-forward. Org admins bypass;
 no Integration bypass actor, so no app can merge without review.
+
+`--bypass-team <slug>` additionally lets the members of one team bypass. It exists
+for the `upstream-sync` team, whose only member is the `codev-sync-bot` machine user
+that merges sync PRs; any other Team actor found on a ruleset is removed.
 """
+import argparse
 import json
 import os
 import sys
@@ -46,6 +51,35 @@ def payload(bypass):
 
 ADMIN = [{"actor_id": 1, "actor_type": "OrganizationAdmin", "bypass_mode": "always"}]
 
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("--bypass-team", metavar="SLUG",
+                help="team in the org whose members may bypass (intended: upstream-sync)")
+opts = ap.parse_args()
+
+WANTED = list(ADMIN)
+if opts.bypass_team:
+    team = api(f"orgs/{ORG}/teams/{opts.bypass_team}")
+    members = api(f"orgs/{ORG}/teams/{opts.bypass_team}/members")
+    print(f"bypass team {team['slug']} (id {team['id']}): "
+          + ", ".join(m["login"] for m in members), flush=True)
+    WANTED.append({"actor_id": team["id"], "actor_type": "Team", "bypass_mode": "always"})
+
+
+def actor_key(a):
+    return (a["actor_type"], a.get("actor_id") if a["actor_type"] != "OrganizationAdmin" else None)
+
+
+def reconcile(actors):
+    """Current bypass list -> the one we want: drop Integration and stray Team actors,
+    keep anything else (RepositoryRole, DeployKey), add the wanted team if missing."""
+    keep = [a for a in actors if a["actor_type"] not in ("Integration", "Team")]
+    have = {actor_key(a) for a in keep}
+    for w in WANTED:
+        if actor_key(w) not in have:
+            keep.append(w)
+    return keep
+
+
 repos, page = [], 1
 while True:
     chunk = api(f"orgs/{ORG}/repos?per_page=100&page={page}&type=all")
@@ -72,18 +106,17 @@ for r in sorted(active, key=lambda r: r["name"]):
     try:
         if rs:
             full = api(f"repos/{ORG}/{name}/rulesets/{rs[0]['id']}")
-            keep = [a for a in full["bypass_actors"] if a["actor_type"] != "Integration"]
+            keep = reconcile(full["bypass_actors"])
             need = (full["enforcement"] != "active"
-                    or len(keep) != len(full["bypass_actors"])
+                    or sorted(map(actor_key, keep)) != sorted(map(actor_key, full["bypass_actors"]))
                     or sorted(x["type"] for x in full["rules"]) != sorted(x["type"] for x in RULES))
             if not need:
                 c["already correct"] += 1
                 continue
-            api(f"repos/{ORG}/{name}/rulesets/{rs[0]['id']}", "PUT",
-                payload(keep or ADMIN))
+            api(f"repos/{ORG}/{name}/rulesets/{rs[0]['id']}", "PUT", payload(keep))
             c["updated"] += 1
         else:
-            api(f"repos/{ORG}/{name}/rulesets", "POST", payload(ADMIN))
+            api(f"repos/{ORG}/{name}/rulesets", "POST", payload(WANTED))
             c["created"] += 1
     except urllib.error.HTTPError as e:
         detail = e.read().decode()[:200]
