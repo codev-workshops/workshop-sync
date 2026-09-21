@@ -230,6 +230,26 @@ listed and closed) is used for deletion; any ambient token (`GH_TOKEN`, `gh auth
 read fallback for the PR check. Deletion failures are reported per branch and make the run
 exit non-zero.
 
+## Lab Tracker sync
+
+`scripts/lab_tracker/` backs the `!sync_lab_tracker` playbook, which appends new lab modules
+from `workshop-content` to the Lab Tracker Google Sheet. The sheet is only reachable through
+its anonymous share link (no Sheets API), so it is read out of the session's already-running
+Chrome over raw CDP; nothing is installed.
+
+```
+node scripts/lab_tracker/read_sheet.mjs "Lab Tracker" --out ~/labsync       # TSV + HTML copy of the tab
+scripts/lab_tracker/lab_tracker.py --repo ~/repos/workshop-content \
+    --sheet ~/labsync/sheet_Lab_Tracker.html --since "8 days ago"           # diff + ready-to-paste rows
+```
+
+`lab_tracker.py` writes `report.md`/`report.json` (missing modules, workshops absent from
+`Appears In`, changes to existing rows — reported, never edited) and, when something is
+missing, `new_rows.tsv` in the sheet's exact column order with `Not Started` in the four status
+columns. Exit code 10 means there are rows to append; 0 means the tracker is in sync. With
+`--since`, the per-row change comparison is skipped when no commit touched `labs/` or
+`workshops/` in that window, which is what keeps a no-change run to a couple of minutes.
+
 ## Maintenance
 
 `discover` reports source repos that are absent from the map and, for each, whether some
