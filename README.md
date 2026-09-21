@@ -21,18 +21,19 @@ The sync is one-directional and copies *content*, never history:
 - **Branch scope: the target default branch, plus `main` and `develop` when they exist on both
   sides.** No other branch's content is ever read or synced; tags, releases, issues and repo
   settings are out of scope.
-- **Synced branches are never pushed to directly.** A run puts the merged snapshot on
-  `sync/upstream-<branch>` in the target and opens a pull request, so the default-branch
-  ruleset (PR + an approval from someone other than the last pusher) governs the sync too.
-  The scheduled run passes `--auto-merge`, which merges that PR immediately as the dedicated
-  `codev-sync-bot` account — the only non-admin identity the ruleset lets bypass (see
-  [Auto-merge](#auto-merge-codev-sync-bot)). Without the flag, or when GitHub refuses the
-  merge, the PR stays open for a human.
+- **Only the sync automation lands on a synced branch directly.** The scheduled run passes
+  `--direct-push --auto-merge`: the merged snapshot is fast-forwarded onto the synced branch
+  with `GITHUB_SYNC_BOT_PAT`, the token of the sync bot account — the only non-admin identity
+  the ruleset lets bypass (see [Auto-merge](#auto-merge-codev-sync-bot)). Nobody else, and no
+  other Devin session, pushes to those branches. If GitHub refuses the push, the run falls back
+  to putting the snapshot on `sync/upstream-<branch>` and opening a pull request (merged at once
+  by the bot when it can; otherwise left open for a human). A manual `apply` without the flags
+  always takes the PR route.
 - **Target commits are preserved.** Each sync three-way merges the new upstream content against
   the previously recorded upstream content, so lab work committed in `codev-workshops` survives.
   Only a real content conflict is escalated to a human — renaming/archiving a target is never
   part of a sync run.
-- A sync only ever appends a commit to a synced branch (through its PR); the only branch it
+- A sync only ever appends a commit to a synced branch (a fast-forward push or its PR); the only branch it
   rewrites is its own `sync/upstream-*`. The single exception is the one-time `squash` command,
   which is what removed the imported upstream history in the first place.
 
@@ -58,6 +59,8 @@ ancestry, the two repos share no commits at all.
 | source moved on | three-way merge of trees, one new commit appended |
 | the merge conflicts | reported for a human; nothing pushed |
 | a sync PR is already open for that branch | the branch is updated, the PR is reused |
+| `--direct-push` and the bot may bypass | the snapshot is fast-forwarded onto the branch; no PR |
+| `--direct-push` but GitHub refuses the push | falls back to the PR route below |
 | `--auto-merge` and the bot may bypass | the PR is rebase-merged at once; the PR remains as the audit trail |
 | `--auto-merge` but GitHub refuses the merge | reported as `left open`; the PR waits for a human |
 | no `Upstream-Commit:` marker anywhere in the branch | reported; run `squash` for that repo first |
@@ -105,7 +108,8 @@ pip install pyyaml
 scripts/sync_from_source.py status               # read-only classification of every pair
 scripts/sync_from_source.py apply --dry-run      # what a run would change
 scripts/sync_from_source.py apply                # open/refresh a sync PR per branch
-scripts/sync_from_source.py apply --auto-merge   # …and merge it as codev-sync-bot (scheduled run)
+scripts/sync_from_source.py apply --auto-merge   # …and merge it as the sync bot
+scripts/sync_from_source.py apply --direct-push --auto-merge   # scheduled run: push, PR only as fallback
 scripts/sync_from_source.py apply --create-missing   # also seed repos under new_repos:
 scripts/sync_from_source.py squash --yes         # one-time: drop imported upstream history
 scripts/sync_from_source.py discover             # find upstream renames / unmapped repos
