@@ -49,7 +49,7 @@ class FakeTokens:
         return ""
 
 
-class SnapshotTest(unittest.TestCase):
+class RepoFixture(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.src = make_repo(self.root / "src", {"a.txt": "1\n", "keep.txt": "s\n"})
@@ -64,6 +64,8 @@ class SnapshotTest(unittest.TestCase):
         S.run(["git", "remote", "add", "s", str(self.src)], cwd=self.r.dir)
         S.run(["git", "remote", "add", "t", str(self.tgt)], cwd=self.r.dir)
 
+
+class SnapshotTest(RepoFixture):
     def test_squash_then_sync_keeps_target_commits(self):
         # 1. squash: target content becomes a single root commit, no source history
         src = self.r.fetch("s", "main")
@@ -145,6 +147,55 @@ class SnapshotTest(unittest.TestCase):
                                   self.r.rewrite_tree(self.r.tree(src2), rw))
         self.assertEqual(S.run(["git", "show", f"{tree}:a.txt"], cwd=self.r.dir),
                          "clone TGT/otter today")
+
+
+class FastPathTest(RepoFixture):
+    """`classify_branch` must not fetch when the API already proves the pair in sync."""
+
+    def _classify(self, recorded_base):
+        default, heads = self.r.refs("s")
+        self.assertEqual(default, "main")
+        _, tgt_heads = self.r.refs("t")
+        with unittest.mock.patch.object(S, "recent_upstream_base", return_value=recorded_base):
+            return S.classify_branch(self.r.cfg, self.r, "tgt", "main", "main", heads["main"],
+                                     tgt_heads["main"], S.Rewrite(self.r.cfg, {}, None), self.r.tk)
+
+    def test_in_sync_without_any_fetch(self):
+        src = S.run(["git", "rev-parse", "HEAD"], cwd=self.src)
+        with unittest.mock.patch.object(S.Repo, "fetch", side_effect=AssertionError("fetched")):
+            b = self._classify(recorded_base=src)
+        self.assertEqual(b["state"], S.IN_SYNC)
+        self.assertEqual(b["src"], src)
+
+    def test_stale_base_falls_back_to_full_classification(self):
+        src = self.r.fetch("s", "main")
+        tgt = self.r.fetch("t", "main")
+        snap = self.r.snapshot(self.r.tree(tgt), src, "main", parent=None)
+        S.run(["git", "push", "-q", "-f", str(self.tgt), f"{snap}:refs/heads/main"], cwd=self.r.dir)
+        commit(self.src, {"a.txt": "2\n"}, "upstream change")
+        b = self._classify(recorded_base=src)
+        self.assertEqual(b["state"], S.UPDATE)
+        self.assertEqual(b["base"], src)
+
+    def test_no_marker_within_lookback_is_still_detected(self):
+        b = self._classify(recorded_base=None)
+        self.assertEqual(b["state"], S.UNSQUASHED)
+
+    def test_trailer_from_log_prefers_newest(self):
+        self.assertEqual(S.trailer_from_log(["human\n", f"snap\n\n{S.TRAILER} aaa\n",
+                                             f"old\n\n{S.TRAILER} bbb\n"]), "aaa")
+        self.assertIsNone(S.trailer_from_log(["nothing"]))
+
+
+class ReportTest(unittest.TestCase):
+    def test_needs_attention_merges_commands(self):
+        path = Path(tempfile.mkdtemp()) / "r.json"
+        S.write_report(str(path), "apply", {"updated": ["x@main"], "conflicts": [], "failed": []})
+        self.assertEqual(S.json.loads(path.read_text())["needs_attention"], [])
+        S.write_report(str(path), "discover", {"gone": [], "unmapped": ["new-repo"]})
+        rep = S.json.loads(path.read_text())
+        self.assertEqual(rep["needs_attention"], ["unmapped"])
+        self.assertEqual(rep["apply"]["updated"], ["x@main"])
 
 
 class AutoMergeTest(unittest.TestCase):

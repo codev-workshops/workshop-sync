@@ -3,7 +3,9 @@
 How `codev-workshops` repos are kept current with their `Cognition-Partner-Workshops`
 originals: [`catalog/sync-map.yaml`](catalog/sync-map.yaml) says what is paired with what,
 and [`scripts/sync_from_source.py`](scripts/sync_from_source.py) does the work. A bi-weekly
-Devin automation runs it against this repo.
+GitHub Actions run ([`upstream-sync.yml`](.github/workflows/upstream-sync.yml)) does the
+routine part; a Devin automation is only triggered when that run opens an issue (see
+[Scheduled run](#scheduled-run)).
 
 (Repo provenance and the workshop catalog itself live in `codev-workshops/workshop-content`;
 this repo only holds the sync map and tooling, so that the catalog can be an exact mirror of
@@ -115,6 +117,26 @@ scripts/sync_from_source.py squash --yes         # one-time: drop imported upstr
 scripts/sync_from_source.py discover             # find upstream renames / unmapped repos
 scripts/sync_from_source.py publish-map --auto-merge   # land a sync-map.yaml-only change as the bot
 ```
+
+`status` (and therefore `apply`) classifies the pairs concurrently (`--jobs`, default 8) and
+fetches nothing for a pair whose recorded `Upstream-Commit:` already equals the source head:
+the heads come from `ls-remote`, the marker from the commit API. Only pairs that moved pay for
+the tree fetches, so a full pass over ~100 in-sync repos takes about 15 s. `apply` prints one
+final summary and lists everything that is not in sync, so it needs no separate `status` run
+before or after. `--report FILE` writes the same summary as JSON (`needs_attention` lists the
+reasons a human must look).
+
+### Scheduled run
+
+[`upstream-sync.yml`](.github/workflows/upstream-sync.yml) runs every other Sunday (even ISO
+weeks; `workflow_dispatch` any time): `apply --direct-push --auto-merge --create-missing`,
+then `discover`. When `needs_attention` is non-empty — a conflict, a refused push/merge, a
+branch without a snapshot marker, a seed failure, or a source repo missing from the map — it
+opens an issue titled `Upstream sync needs attention …` (label `sync-attention`) with
+`report.json` and the log. The Devin automation is triggered by that issue and works only the
+listed items, following the playbook. Nothing else starts a Devin session. Repo secrets
+(GitHub reserves the `GITHUB_` prefix): `SYNC_UPSTREAM_READ_PAT` (read on the source org, used
+as `GH_TOKEN`), `SYNC_MIRROR_PAT` (`GITHUB_MIRROR_PAT`), `SYNC_BOT_PAT` (`GITHUB_SYNC_BOT_PAT`).
 
 Credentials: reading the source org and opening sync PRs works with any token that has contents
 access to both orgs plus pull-request write on the target (`gh auth login` is enough). No

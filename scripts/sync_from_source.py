@@ -69,6 +69,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -85,6 +86,10 @@ EXTRA_BRANCHES = ("main", "develop")
 TRAILER = "Upstream-Commit:"
 
 IN_SYNC, UPDATE, UNSQUASHED = "in-sync", "update", "no-snapshot"
+# Pairs classified concurrently by `status`; the work is almost entirely network wait.
+DEFAULT_JOBS = 8
+# Commits read through the API before falling back to a full walk of the target branch.
+TRAILER_LOOKBACK = 30
 # Snapshots land here and reach the synced branch through a reviewed pull request.
 SYNC_BRANCH = "sync/upstream-{branch}"
 IDENT = ["-c", "user.name=workshop-sync", "-c", "user.email=workshop-sync@codev-workshops"]
@@ -258,10 +263,22 @@ class Repo:
         git_auth(["fetch", "-q", *flt, remote, ref], token, cwd=self.dir)
         return run(["git", "rev-parse", "FETCH_HEAD"], cwd=self.dir)
 
-    def branches(self, remote: str) -> list[str]:
+    def refs(self, remote: str) -> tuple[str, dict[str, str]]:
+        """(default branch, {branch: head sha}) of a remote from one `ls-remote`."""
         token = self.tk.src if remote == "s" else self.tk.tgt
-        out = git_auth(["ls-remote", "--heads", remote], token, cwd=self.dir)
-        return [line.split("refs/heads/")[-1] for line in out.splitlines() if line]
+        out = git_auth(["ls-remote", "--symref", remote, "HEAD", "refs/heads/*"], token,
+                       cwd=self.dir)
+        default, heads = "", {}
+        for line in out.splitlines():
+            if line.startswith("ref: refs/heads/"):
+                default = line.split()[1].split("refs/heads/", 1)[1]
+            elif "\trefs/heads/" in line:
+                sha, ref = line.split("\t", 1)
+                heads[ref.split("refs/heads/", 1)[1]] = sha
+        return default, heads
+
+    def branches(self, remote: str) -> list[str]:
+        return list(self.refs(remote)[1])
 
     def upstream_base(self, sha: str) -> str | None:
         """Source commit recorded by the newest snapshot commit reachable from `sha`.
@@ -270,11 +287,7 @@ class Repo:
         target branch is searched, newest first, not just its head.
         """
         log = run(["git", "log", "--format=%B%x01", sha], cwd=self.dir)
-        for body in log.split("\x01"):
-            for line in reversed(body.splitlines()):
-                if line.startswith(TRAILER):
-                    return line.split(":", 1)[1].strip()
-        return None
+        return trailer_from_log(log.split("\x01"))
 
     def tree(self, sha: str) -> str:
         return run(["git", "rev-parse", f"{sha}^{{tree}}"], cwd=self.dir)
@@ -402,17 +415,47 @@ def default_branch(org: str, repo: str, tk: Tokens) -> str:
     return api(f"repos/{org}/{repo}", token=tk.for_org(org))["default_branch"]
 
 
-def synced_branches(r: Repo, sb_default: str, tb_default: str) -> list[tuple[str, str]]:
+def synced_branches(sb_default: str, tb_default: str, src: set[str], tgt: set[str]) -> list[tuple[str, str]]:
     """(source branch, target branch) pairs in scope: the default plus main/develop."""
     pairs = [(sb_default, tb_default)]
-    src, tgt = set(r.branches("s")), set(r.branches("t"))
     for b in EXTRA_BRANCHES:
         if b not in (sb_default, tb_default) and b in src and b in tgt:
             pairs.append((b, b))
     return pairs
 
 
-def classify_branch(r: Repo, sb: str, tb: str, rw: Rewrite) -> dict:
+def trailer_from_log(bodies: list[str]) -> str | None:
+    """Source commit recorded by the newest snapshot among `bodies` (newest first)."""
+    for body in bodies:
+        for line in reversed(body.splitlines()):
+            if line.startswith(TRAILER):
+                return line.split(":", 1)[1].strip()
+    return None
+
+
+def recent_upstream_base(cfg, target: str, tgt_head: str, tk: Tokens) -> str | None:
+    """`Upstream-Commit:` of the newest snapshot within the last few target commits, via
+    the API — no clone. None when no snapshot is that close to the head."""
+    try:
+        commits = api(f"repos/{cfg['target_org']}/{target}/commits"
+                      f"?sha={tgt_head}&per_page={TRAILER_LOOKBACK}", token=tk.tgt)
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        return None
+    return trailer_from_log([c["commit"]["message"] for c in commits])
+
+
+def classify_branch(cfg, r: Repo, target: str, sb: str, tb: str, src_head: str, tgt_head: str,
+                    rw: Rewrite, tk: Tokens) -> dict:
+    """Classify one branch pair, fetching trees only when the cheap check is inconclusive.
+
+    The heads come from `ls-remote`; the target's recorded base comes from the commit
+    API. When it equals the source head the pair is in sync and nothing is fetched —
+    the common case on a scheduled run. Otherwise the trees are fetched (the source
+    with `--depth=1`, the target treeless) and compared as before.
+    """
+    base = recent_upstream_base(cfg, target, tgt_head, tk)
+    if base == src_head:
+        return dict(sb=sb, tb=tb, src=src_head, tgt=tgt_head, base=base, state=IN_SYNC)
     src = r.fetch("s", sb)
     tgt = r.fetch("t", tb, history=True)
     base = r.upstream_base(tgt)
@@ -430,9 +473,15 @@ def classify(cfg, mp, pair, tk) -> dict:
     r = Repo(cfg, source, target, tk)
     try:
         rw = Rewrite(cfg, mp, pair.get("rewrite"))
-        sb = default_branch(cfg["source_org"], source, tk)
-        tb = default_branch(cfg["target_org"], target, tk)
-        branches = [classify_branch(r, s, t, rw) for s, t in synced_branches(r, sb, tb)]
+        sb, src_heads = r.refs("s")
+        tb, tgt_heads = r.refs("t")
+        sb = sb or default_branch(cfg["source_org"], source, tk)
+        tb = tb or default_branch(cfg["target_org"], target, tk)
+        branches = []
+        for s, t in synced_branches(sb, tb, set(src_heads), set(tgt_heads)):
+            if s not in src_heads or t not in tgt_heads:
+                raise RuntimeError(f"branch missing: source {s!r} / target {t!r}")
+            branches.append(classify_branch(cfg, r, target, s, t, src_heads[s], tgt_heads[t], rw, tk))
         return dict(source=source, target=target, branches=branches, repo=r, rewrite=rw, error="")
     except Exception as exc:
         r.close()
@@ -447,17 +496,28 @@ def describe(res) -> str:
 
 
 def cmd_status(cfg, mp, tk, args) -> list[dict]:
+    pairs = [p for p in mp["pairs"]
+             if (not args.only or args.only in (p["source"], p["target"]))
+             and p.get("sync", cfg["sync"]) != "off"]
     results = []
-    pairs = [p for p in mp["pairs"] if not args.only or args.only in (p["source"], p["target"])]
-    for pair in pairs:
-        if pair.get("sync", cfg["sync"]) == "off":
-            continue
-        res = classify(cfg, mp, pair, tk)
-        results.append(res)
-        print(f"  {res['source']} -> {res['target']}: {describe(res)}", flush=True)
-        if res["repo"] and not args.keep:
-            res["repo"].close()
-            res["repo"] = None
+    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        for res in pool.map(lambda p: classify(cfg, mp, p, tk), pairs):
+            results.append(res)
+            print(f"  {res['source']} -> {res['target']}: {describe(res)}", flush=True)
+            if res["repo"] and not args.keep:
+                res["repo"].close()
+                res["repo"] = None
+    if not args.only:
+        counts = {}
+        for res in results:
+            for b in res["branches"]:
+                counts[b["state"]] = counts.get(b["state"], 0) + 1
+        if any(r["error"] for r in results):
+            counts["error"] = sum(1 for r in results if r["error"])
+        print("\nstatus: " + " | ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
+        for res in results:
+            if res["error"] or any(b["state"] != IN_SYNC for b in res["branches"]):
+                print(f"  {res['source']} -> {res['target']}: {describe(res)}")
     return results
 
 
@@ -529,9 +589,10 @@ def cmd_apply(cfg, mp, tk, args):
                 res["repo"].close()
                 res["repo"] = None
 
+    seed_failed = []
     if args.create_missing:
         print("== new repos ==")
-        create_missing(cfg, mp, tk, args)
+        seed_failed = create_missing(cfg, mp, tk, args)
 
     print(f"\nupdated: {len(changed)} | conflicts: {len(conflicts)} | "
           f"awaiting squash: {len(pending)} | failed: {len(failed)}"
@@ -546,6 +607,35 @@ def cmd_apply(cfg, mp, tk, args):
         print(f"  conflict: {res['source']} -> {res['target']}@{b['tb']}")
     for res, why in failed:
         print(f"  failed: {res['source']} -> {res['target']}: {why}")
+    if args.report:
+        write_report(args.report, "apply", {
+            "updated": [f"{r['target']}@{b['tb']}" for r, b in changed],
+            "pushed": [f"https://github.com/{cfg['target_org']}/{r['target']}/commit/{sha}"
+                       for r, b, sha in pushed],
+            "merged": [url for r, b, url in merged],
+            "left_open": [f"{url}: {why}" for r, b, url, why in unmerged],
+            "conflicts": [f"{r['source']} -> {r['target']}@{b['tb']}" for r, b in conflicts],
+            "no_snapshot": [f"{r['target']}@{b['tb']}" for r, b in pending],
+            "failed": [f"{r['source']} -> {r['target']}: {why}" for r, why in failed],
+            "seed_failed": seed_failed,
+        })
+
+
+def write_report(path: str, command: str, data: dict):
+    """Merge `data` into the JSON report at `path` (one file across several commands).
+
+    `needs_attention` is true when a human or a Devin session must look at the run:
+    a conflict, a refused merge, a failure, a branch without a snapshot, or a source
+    repo that is missing from the map.
+    """
+    p = Path(path)
+    report = json.loads(p.read_text()) if p.exists() else {}
+    report[command] = data
+    attention = [k for k in ("conflicts", "left_open", "failed", "no_snapshot", "seed_failed",
+                             "gone", "unmapped")
+                 for name, cmd in report.items() if name != "needs_attention" and cmd.get(k)]
+    report["needs_attention"] = sorted(set(attention))
+    p.write_text(json.dumps(report, indent=2) + "\n")
 
 
 def cmd_squash(cfg, mp, tk, args):
@@ -565,9 +655,9 @@ def cmd_squash(cfg, mp, tk, args):
         source, target = pair["source"], pair["target"]
         r = Repo(cfg, source, target, tk)
         try:
-            sb = default_branch(cfg["source_org"], source, tk)
-            tb = default_branch(cfg["target_org"], target, tk)
-            for s, t in synced_branches(r, sb, tb):
+            sb, src_heads = r.refs("s")
+            tb, tgt_heads = r.refs("t")
+            for s, t in synced_branches(sb, tb, set(src_heads), set(tgt_heads)):
                 src = r.fetch("s", s)
                 tgt = r.fetch("t", t, history=True)
                 if r.upstream_base(tgt) and not args.again:
@@ -592,10 +682,12 @@ def cmd_squash(cfg, mp, tk, args):
         print(f"  failed: {target}: {why}")
 
 
-def create_missing(cfg, mp, tk, args):
+def create_missing(cfg, mp, tk, args) -> list[str]:
+    """Create and seed every `new_repos` entry; returns the entries that failed."""
+    failed = []
     if not tk.can_create:
         print("  GITHUB_MIRROR_PAT is not set — repo creation needs Administration:write; skipping")
-        return
+        return failed
     existing = {r["name"] for r in api_all(f"orgs/{cfg['target_org']}/repos?type=all", tk.tgt)}
     for entry in mp.get("new_repos") or []:
         source = entry["source"]
@@ -618,8 +710,9 @@ def create_missing(cfg, mp, tk, args):
             seed(cfg, source, target, tk, Rewrite(cfg, mp, entry.get("rewrite")))
             print(f"  seeded {source} -> {target}")
         except Exception as exc:
-            print(f"  FAILED {source} -> {target}: "
-                  f"{redact(str(exc)).splitlines()[-1][:200]}")
+            failed.append(f"{source} -> {target}: {redact(str(exc)).splitlines()[-1][:200]}")
+            print(f"  FAILED {failed[-1]}")
+    return failed
 
 
 def seed(cfg, source: str, target: str, tk: Tokens, rw: Rewrite | None = None):
@@ -690,6 +783,8 @@ def cmd_discover(cfg, mp, tk, args):
             print(f"  - {s}: {hint}")
     if not gone and not unmapped:
         print("map is complete: every source repo is either paired or listed under new_repos")
+    if args.report:
+        write_report(args.report, "discover", {"gone": sorted(gone), "unmapped": unmapped})
 
 
 def cmd_publish_map(cfg, mp, tk, args):
@@ -775,6 +870,10 @@ def main():
     ap.add_argument("--again", action="store_true",
                     help="squash: re-squash branches that already have a snapshot marker")
     ap.add_argument("--message", help="publish-map: commit message / PR title")
+    ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                    help=f"status/apply: pairs classified concurrently (default {DEFAULT_JOBS})")
+    ap.add_argument("--report", metavar="FILE",
+                    help="apply/discover: also write a JSON summary (merged into FILE if it exists)")
     ap.add_argument("--map", default=str(MAP_PATH))
     args = ap.parse_args()
     args.keep = False
