@@ -7,7 +7,9 @@ no Integration bypass actor, so no app can merge without review.
 
 `--bypass-team <slug>` additionally lets the members of one team bypass. It exists
 for the `upstream-sync` team, whose only member is the `codev-sync-bot` machine user
-that merges sync PRs; any other Team actor found on a ruleset is removed.
+that merges sync PRs; any other Team actor found on a ruleset is removed. The team
+must not be Secret (GitHub rejects secret teams as bypass actors); it is also given
+write access on every active repo, since the org base permission is read-only.
 """
 import argparse
 import json
@@ -63,6 +65,9 @@ if opts.bypass_team:
     print(f"bypass team {team['slug']} (id {team['id']}): "
           + ", ".join(m["login"] for m in members), flush=True)
     WANTED.append({"actor_id": team["id"], "actor_type": "Team", "bypass_mode": "always"})
+    if team["privacy"] == "secret":
+        sys.exit(f"team {team['slug']} is secret; GitHub only accepts visible (closed) "
+                 f"teams as bypass actors. Fix: PATCH orgs/{ORG}/teams/{team['slug']} privacy=closed")
 
 
 def actor_key(a):
@@ -97,6 +102,13 @@ for r in sorted(active, key=lambda r: r["name"]):
         c["empty repo (no default branch)"] += 1
         notes.append((name, "empty"))
         continue
+    if opts.bypass_team:
+        try:
+            api(f"orgs/{ORG}/teams/{opts.bypass_team}/repos/{ORG}/{name}", "PUT",
+                {"permission": "push"})
+        except urllib.error.HTTPError as e:
+            c[f"team-grant {e.code}"] += 1
+            notes.append((name, f"team-grant {e.code}"))
     try:
         rs = [x for x in api(f"repos/{ORG}/{name}/rulesets") if x["name"] == "protect-default-branch"]
     except urllib.error.HTTPError as e:

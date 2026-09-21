@@ -130,9 +130,12 @@ scheduled run merges its own PRs. GitHub cannot grant a bypass to a *token* — 
 roles, teams and apps, and a PAT simply acts as its owner — so the bypass is tied to an account
 that does nothing else:
 
-- `codev-sync-bot` is a machine user, a plain member of `codev-workshops`, and the only member
-  of the team `upstream-sync`.
-- `apply_rulesets.py --bypass-team upstream-sync` adds that team (`bypass_mode: always`) next
+- `codev-sync-bot` (GitHub login `reslk`) is a machine user, a plain member of
+  `codev-workshops`, and the only member of the team `upstream-sync`. The team must be
+  *visible* (closed), not Secret — GitHub refuses secret teams as bypass actors with
+  `Actor … team must be part of the ruleset source or owner organization`.
+- `apply_rulesets.py --bypass-team upstream-sync` grants that team write access on every
+  active repo (the org base permission is read-only), then adds it (`bypass_mode: always`) next
   to org admins on every `protect-default-branch` ruleset and strips any other Team or
   Integration actor. Nothing else — no human, no Devin App — gains a bypass.
 - `GITHUB_SYNC_BOT_PAT` is the bot's fine-grained PAT (`codev-workshops`, all repositories,
