@@ -13,6 +13,11 @@ commits keep surviving without any shared ancestry between the two repos.
 Branch scope: the target's default branch, plus `main` and `develop` when they
 exist on both sides. No other branch's content is ever read or synced.
 
+A pair may declare `rewrite:` rules (see `Rewrite`). They are applied to the
+*source* trees (recorded base and current source) before the merge, so a target
+that deliberately differs from its source in a mechanical way (e.g. links pointing
+at the target org) does not conflict every time upstream touches those lines.
+
 By default `apply` puts the merged snapshot on a `sync/upstream-<branch>` branch
 and opens a pull request, so the default-branch ruleset (PR + a peer approval)
 applies to the sync as well.
@@ -30,6 +35,8 @@ Subcommands
     squash     one-time: replace a target branch's history with a single snapshot
                commit of its current content (force push; --yes required)
     discover   re-fingerprint both orgs and report pairs missing from the map
+    publish-map  commit the local change to catalog/sync-map.yaml on a branch of
+               this repo, open a PR and (with --auto-merge) merge it as the sync bot
 
 Auth
     GITHUB_MIRROR_PAT  fine-grained PAT (Contents+Administration write on the target
@@ -81,6 +88,52 @@ IN_SYNC, UPDATE, UNSQUASHED = "in-sync", "update", "no-snapshot"
 # Snapshots land here and reach the synced branch through a reviewed pull request.
 SYNC_BRANCH = "sync/upstream-{branch}"
 IDENT = ["-c", "user.name=workshop-sync", "-c", "user.email=workshop-sync@codev-workshops"]
+MAP_BRANCH = "sync/map-maintenance"
+
+
+class Rewrite:
+    """Textual rewrite of a source tree, declared per pair in the map:
+
+        rewrite:
+          - org-references              # <source_org>/<repo> -> <target_org>/<repo> for every
+                                        # mapped repo, and bare mentions of the source org
+          - from: "literal text"        # plain literal replacement
+            to: "replacement"
+
+    Only UTF-8 text blobs are touched; binaries pass through unchanged.
+    """
+
+    def __init__(self, cfg, mp, rules):
+        self.rules = []
+        repos = sorted({p.get("target", p["source"]) for p in mp.get("pairs") or []}
+                       | {e.get("target", e["source"]) for e in mp.get("new_repos") or []},
+                       key=len, reverse=True)
+        for rule in rules or []:
+            if rule == "org-references":
+                src, tgt = cfg["source_org"], cfg["target_org"]
+                alt = "|".join(re.escape(r) for r in repos)
+                pat = re.compile(rf"{re.escape(src)}(?=/(?:{alt})\b|/\s|/$)"
+                                 rf"|(?<=/orgs/){re.escape(src)}"
+                                 rf"|{re.escape(src)}(?![/\w-])")
+                self.rules.append((pat, tgt))
+            elif isinstance(rule, dict) and "from" in rule and "to" in rule:
+                self.rules.append((re.compile(re.escape(rule["from"])), rule["to"]))
+            else:
+                raise ValueError(f"unknown rewrite rule: {rule!r}")
+
+    def __bool__(self):
+        return bool(self.rules)
+
+    def text(self, data: bytes) -> bytes:
+        if b"\0" in data:
+            return data
+        try:
+            s = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data
+        for pat, to in self.rules:
+            s = pat.sub(to, s)
+        return s.encode("utf-8")
 
 
 class MergeConflict(RuntimeError):
@@ -250,6 +303,39 @@ class Repo:
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
+    def rewrite_tree(self, tree: str, rw: "Rewrite") -> str:
+        """Return `tree` with `rw` applied to every text blob (same tree when no rule)."""
+        if not rw:
+            return tree
+        scratch = Path(tempfile.mkdtemp(prefix="rw-"))
+        env = {"GIT_DIR": str(self.dir / ".git"), "GIT_INDEX_FILE": str(scratch / ".idx")}
+        try:
+            run(["git", "read-tree", tree], cwd=scratch, env=env)
+            entries = run(["git", "ls-tree", "-r", "-z", tree], cwd=self.dir)
+            info = []
+            for ent in entries.split("\0"):
+                if not ent:
+                    continue
+                meta, path = ent.split("\t", 1)
+                mode, kind, sha = meta.split()
+                if kind != "blob" or mode == "120000":
+                    continue
+                data = subprocess.run(["git", "cat-file", "blob", sha], cwd=self.dir,
+                                      capture_output=True, check=True).stdout
+                new = rw.text(data)
+                if new == data:
+                    continue
+                new_sha = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.dir,
+                                         input=new, capture_output=True, check=True).stdout.decode().strip()
+                info.append(f"{mode} {new_sha}\t{path}")
+            if info:
+                subprocess.run(["git", "update-index", "--index-info"], cwd=scratch,
+                               input=("\n".join(info) + "\n").encode(), check=True,
+                               capture_output=True, env={**os.environ, **env})
+            return run(["git", "write-tree"], cwd=scratch, env=env)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
     def snapshot(self, tree: str, upstream: str, branch: str, parent: str | None) -> str:
         """Commit `tree` as a snapshot of the source, optionally on top of `parent`."""
         msg = (f"Sync content from {self.cfg['source_org']}/{self.source}@{branch}\n\n"
@@ -326,27 +412,28 @@ def synced_branches(r: Repo, sb_default: str, tb_default: str) -> list[tuple[str
     return pairs
 
 
-def classify_branch(r: Repo, sb: str, tb: str) -> dict:
+def classify_branch(r: Repo, sb: str, tb: str, rw: Rewrite) -> dict:
     src = r.fetch("s", sb)
     tgt = r.fetch("t", tb, history=True)
     base = r.upstream_base(tgt)
     if base is None:
         state = UNSQUASHED
-    elif base == src or r.tree(src) == r.tree(tgt):
+    elif base == src or r.rewrite_tree(r.tree(src), rw) == r.tree(tgt):
         state = IN_SYNC
     else:
         state = UPDATE
     return dict(sb=sb, tb=tb, src=src, tgt=tgt, base=base, state=state)
 
 
-def classify(cfg, pair, tk) -> dict:
+def classify(cfg, mp, pair, tk) -> dict:
     source, target = pair["source"], pair["target"]
     r = Repo(cfg, source, target, tk)
     try:
+        rw = Rewrite(cfg, mp, pair.get("rewrite"))
         sb = default_branch(cfg["source_org"], source, tk)
         tb = default_branch(cfg["target_org"], target, tk)
-        branches = [classify_branch(r, s, t) for s, t in synced_branches(r, sb, tb)]
-        return dict(source=source, target=target, branches=branches, repo=r, error="")
+        branches = [classify_branch(r, s, t, rw) for s, t in synced_branches(r, sb, tb)]
+        return dict(source=source, target=target, branches=branches, repo=r, rewrite=rw, error="")
     except Exception as exc:
         r.close()
         return dict(source=source, target=target, branches=[], repo=None,
@@ -365,7 +452,7 @@ def cmd_status(cfg, mp, tk, args) -> list[dict]:
     for pair in pairs:
         if pair.get("sync", cfg["sync"]) == "off":
             continue
-        res = classify(cfg, pair, tk)
+        res = classify(cfg, mp, pair, tk)
         results.append(res)
         print(f"  {res['source']} -> {res['target']}: {describe(res)}", flush=True)
         if res["repo"] and not args.keep:
@@ -394,9 +481,11 @@ def cmd_apply(cfg, mp, tk, args):
                     print(f"  {label}: no {TRAILER} snapshot marker — run `squash` first")
                     continue
                 r: Repo = res["repo"]
+                rw: Rewrite = res["rewrite"]
                 r.fetch("s", b["base"])
                 try:
-                    tree = r.merge_trees(r.tree(b["base"]), r.tree(b["tgt"]), r.tree(b["src"]))
+                    tree = r.merge_trees(r.rewrite_tree(r.tree(b["base"]), rw), r.tree(b["tgt"]),
+                                         r.rewrite_tree(r.tree(b["src"]), rw))
                 except MergeConflict as exc:
                     conflicts.append((res, b))
                     print(f"  {label}: CONFLICT {str(exc).splitlines()[0][:120]}")
@@ -526,14 +615,14 @@ def create_missing(cfg, mp, tk, args):
                 "auto_init": False,
             }, token=tk.tgt)
         try:
-            seed(cfg, source, target, tk)
+            seed(cfg, source, target, tk, Rewrite(cfg, mp, entry.get("rewrite")))
             print(f"  seeded {source} -> {target}")
         except Exception as exc:
             print(f"  FAILED {source} -> {target}: "
                   f"{redact(str(exc)).splitlines()[-1][:200]}")
 
 
-def seed(cfg, source: str, target: str, tk: Tokens):
+def seed(cfg, source: str, target: str, tk: Tokens, rw: Rewrite | None = None):
     """Populate an empty target with one snapshot commit of the source default branch.
 
     No upstream history and no branch other than the default is copied.
@@ -545,7 +634,8 @@ def seed(cfg, source: str, target: str, tk: Tokens):
     try:
         sb = default_branch(cfg["source_org"], source, tk)
         src = r.fetch("s", sb)
-        sha = r.snapshot(r.tree(src), src, sb, parent=None)
+        tree = r.rewrite_tree(r.tree(src), rw) if rw else r.tree(src)
+        sha = r.snapshot(tree, src, sb, parent=None)
         try:
             r.push(sha, sb)
         except RuntimeError as exc:
@@ -602,10 +692,77 @@ def cmd_discover(cfg, mp, tk, args):
         print("map is complete: every source repo is either paired or listed under new_repos")
 
 
+def cmd_publish_map(cfg, mp, tk, args):
+    """Land a change to catalog/sync-map.yaml without a peer review.
+
+    Guard: the working tree of this repo may differ from HEAD *only* in the map file,
+    so the bot never lands code. The change is committed on MAP_BRANCH, pushed with
+    the ambient token, opened as a PR and — with --auto-merge — rebase-merged by the
+    sync bot exactly like a sync PR. A refused merge leaves the PR open for a human.
+    """
+    root = Path(args.map).resolve().parent.parent
+    rel = str(Path(args.map).resolve().relative_to(root))
+    repo = run(["git", "rev-parse", "--show-toplevel"], cwd=root)
+    if Path(repo).resolve() != root:
+        sys.exit(f"{args.map} is not at <repo>/catalog/sync-map.yaml")
+    porcelain = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                               cwd=root, capture_output=True, text=True, check=True).stdout
+    dirty = [l[3:] for l in porcelain.splitlines() if l.strip()]
+    if not dirty:
+        print("map unchanged — nothing to publish")
+        return
+    if dirty != [rel]:
+        sys.exit(f"publish-map lands only {rel}; also modified: {[d for d in dirty if d != rel]}")
+    if args.auto_merge and not tk.bot:
+        sys.exit("--auto-merge needs GITHUB_SYNC_BOT_PAT (the sync bot token).")
+    origin = run(["git", "remote", "get-url", "origin"], cwd=root)
+    m = re.search(r"github\.com(?::443)?/([^/]+)/([^/.]+?)(?:\.git)?/?$", origin)
+    if not m:
+        sys.exit(f"cannot tell the GitHub repo from origin {origin}")
+    org, name = m.groups()
+    base = run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=root,
+               check=False).split("/")[-1] or "main"
+    title = args.message or "sync-map: scheduled maintenance"
+    if args.dry_run:
+        print(f"DRY-RUN would push {rel} as '{title}' to {org}/{name}:{MAP_BRANCH} and open a PR")
+        return
+    blob = run(["git", "hash-object", "-w", rel], cwd=root)
+    head = run(["git", "rev-parse", "HEAD"], cwd=root)
+    scratch = Path(tempfile.mkdtemp(prefix="map-"))
+    env = {"GIT_INDEX_FILE": str(scratch / ".idx")}
+    try:
+        run(["git", "read-tree", "HEAD"], cwd=root, env=env)
+        subprocess.run(["git", "update-index", "--index-info"], cwd=root, check=True,
+                       input=f"100644 {blob}\t{rel}\n".encode(), capture_output=True,
+                       env={**os.environ, **env})
+        tree = run(["git", "write-tree"], cwd=root, env=env)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    sha = run(["git", *IDENT, "commit-tree", tree, "-p", head, "-m", title], cwd=root)
+    url = f"{GIT_BASE}/{org}/{name}"
+    git_auth(["push", "-q", url, f"+{sha}:refs/heads/{MAP_BRANCH}"], tk.src, cwd=root)
+    existing = api(f"repos/{org}/{name}/pulls?state=open&head={org}:{MAP_BRANCH}&base={base}",
+                   token=tk.pulls)
+    pr = existing[0] if existing else api(
+        f"repos/{org}/{name}/pulls", "POST",
+        {"title": title, "head": MAP_BRANCH, "base": base,
+         "body": "Map-only maintenance committed by the sync automation "
+                 "(`publish-map`). Nothing outside `catalog/sync-map.yaml` is changed.\n"},
+        token=tk.pulls)
+    print(f"map PR {pr['html_url']} ({sha[:8]})")
+    if args.auto_merge:
+        why = merge_pr({"target_org": org}, name, pr, sha, tk)
+        if why:
+            print(f"NOT MERGED ({why}) — PR left open")
+        else:
+            print("merged")
+            run(["git", "fetch", "-q", "origin", base], cwd=root, check=False)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", nargs="?", default="status",
-                    choices=["status", "apply", "squash", "discover"])
+                    choices=["status", "apply", "squash", "discover", "publish-map"])
     ap.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     ap.add_argument("--only", help="restrict to one repo (source or target name)")
     ap.add_argument("--create-missing", action="store_true", help="apply: also create/seed new_repos")
@@ -617,6 +774,7 @@ def main():
     ap.add_argument("--yes", action="store_true", help="squash: confirm the irreversible rewrite")
     ap.add_argument("--again", action="store_true",
                     help="squash: re-squash branches that already have a snapshot marker")
+    ap.add_argument("--message", help="publish-map: commit message / PR title")
     ap.add_argument("--map", default=str(MAP_PATH))
     args = ap.parse_args()
     args.keep = False
@@ -625,7 +783,7 @@ def main():
     cfg = mp["defaults"]
     tk = Tokens(cfg)
     {"status": cmd_status, "apply": cmd_apply, "squash": cmd_squash,
-     "discover": cmd_discover}[args.command](cfg, mp, tk, args)
+     "discover": cmd_discover, "publish-map": cmd_publish_map}[args.command](cfg, mp, tk, args)
 
 
 if __name__ == "__main__":

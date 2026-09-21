@@ -19,6 +19,12 @@
 #                            does not need rewriting; both behave the same now)
 #   off                      never touch this repo
 #
+# rewrite: (optional, per pair) textual rules applied to the SOURCE content before the
+# three-way merge, for targets that deliberately differ from upstream in a mechanical
+# way. `org-references` turns `Cognition-Partner-Workshops/<mapped repo>` (and bare
+# mentions of the source org) into `codev-workshops/<repo>`; `{from, to}` is a literal
+# replacement. Without it every upstream edit of such a line conflicts.
+#
 # Last verified: 2026-09-21
 
 defaults:
@@ -221,6 +227,11 @@ pairs:
     # target-ahead; the tooling moved to codev-workshops/workshop-sync and the old repo was
     # archived as workshop-metadata-lab, so this is now a plain mirror
     # in_sync as of last verification
+    # attendee links must point at codev-workshops: the target rewrote them by hand in
+    # 148 files, so upstream edits of those lines conflicted (2026-09-21) until the
+    # rewrite became part of the sync
+    rewrite:
+      - org-references
 
   - source: ACC-demo-webapp
     target: ACC-demo-webapp

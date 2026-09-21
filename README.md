@@ -113,6 +113,7 @@ scripts/sync_from_source.py apply --direct-push --auto-merge   # scheduled run: 
 scripts/sync_from_source.py apply --create-missing   # also seed repos under new_repos:
 scripts/sync_from_source.py squash --yes         # one-time: drop imported upstream history
 scripts/sync_from_source.py discover             # find upstream renames / unmapped repos
+scripts/sync_from_source.py publish-map --auto-merge   # land a sync-map.yaml-only change as the bot
 ```
 
 Credentials: reading the source org and opening sync PRs works with any token that has contents
@@ -156,6 +157,37 @@ branch outside the default/`main`/`develop` scope, never force-pushes anything b
 `sync/upstream-*`, and still leaves conflicts and push-protection rejections to a human. Those
 guardrails in the script are now the review, so changes to `sync_from_source.py` itself deserve
 a careful look.
+
+### Per-pair rewrites
+
+Some targets deliberately differ from upstream in a purely mechanical way — `workshop-content`
+rewrites every `Cognition-Partner-Workshops/<repo>` link to `codev-workshops/<repo>` so
+attendees land in the org they have access to. Left alone, every upstream edit of such a line
+conflicts, and reconciling by hand does not help: the next upstream edit conflicts again. A pair
+can therefore declare
+
+```yaml
+  - source: workshop-content
+    target: workshop-content
+    rewrite:
+      - org-references          # <source_org>/<mapped repo>, /orgs/<source_org>, bare org name
+      - {from: "literal", to: "replacement"}
+```
+
+The rules are applied to the *source* side (recorded base and current tree) before the
+three-way merge, and to the seed of a new repo; `status` compares the rewritten source tree.
+Only UTF-8 text blobs are touched, binaries pass through, and `Upstream-Commit:` still records
+the real source SHA. `org-references` leaves `<source_org>/<unmapped repo>` alone, so a link
+to a repo that has no copy in the target org keeps pointing where it works.
+
+### Map maintenance without a peer review (`publish-map`)
+
+`catalog/sync-map.yaml` changes on nearly every scheduled run (`# Last verified:`, newly
+discovered repos, seeded repos moving into `pairs:`). Waiting for an approval on each of those
+PRs blocked the automation, so `publish-map` commits the map change on `sync/map-maintenance`,
+opens a PR and — with `--auto-merge` — rebase-merges it as `codev-sync-bot`, exactly like a sync
+PR. Its guard is that the working tree may differ from `HEAD` **only** in the map file: the bot
+never lands code. Changes to `scripts/` still go through a normal reviewed PR.
 
 ## Default-branch protection
 
