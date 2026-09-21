@@ -16,6 +16,9 @@ exist on both sides. No other branch's content is ever read or synced.
 Nothing is ever pushed straight onto a synced branch: `apply` puts the merged
 snapshot on a `sync/upstream-<branch>` branch and opens a pull request, so the
 default-branch ruleset (PR + a peer approval) applies to the sync as well.
+With `--auto-merge` the PR is merged right away using GITHUB_SYNC_BOT_PAT, the
+token of the dedicated `codev-sync-bot` account that the ruleset lets bypass;
+the PR stays as the audit trail and a merge that GitHub refuses is left open.
 
 Subcommands
     status     classify every mapped pair (default; read-only)
@@ -27,6 +30,9 @@ Subcommands
 Auth
     GITHUB_MIRROR_PAT  fine-grained PAT (Contents+Administration write on the target
                        org). Required for `apply --create-missing`; optional otherwise.
+    GITHUB_SYNC_BOT_PAT  fine-grained PAT of the `codev-sync-bot` machine user
+                       (Contents+Pull requests write on the target org). Required
+                       for `apply --auto-merge`; never used for anything else.
     Falls back to `gh auth token` for API calls and to ambient git credentials
     for pushes.
 
@@ -34,6 +40,7 @@ Examples
     scripts/sync_from_source.py status
     scripts/sync_from_source.py apply --dry-run
     scripts/sync_from_source.py apply --only=timesheet-app
+    scripts/sync_from_source.py apply --auto-merge
     scripts/sync_from_source.py squash --only=calcom --yes
     scripts/sync_from_source.py discover
 """
@@ -93,6 +100,11 @@ class Tokens:
         # requests; the ambient (app) token can, and is used for that one call.
         self.pulls = ambient or pat
         self.can_create = bool(pat)
+        # The bot token is the only credential allowed to land a sync on a protected
+        # branch. It opens and merges the sync PR and touches nothing else.
+        self.bot = os.environ.get("GITHUB_SYNC_BOT_PAT", "")
+        if self.bot:
+            self.pulls = self.bot
         self._by_org = {cfg["source_org"]: self.src, cfg["target_org"]: self.tgt}
 
     def for_org(self, org: str) -> str:
@@ -248,21 +260,41 @@ class Repo:
         git_auth(["push", "t", ref], self.tk.tgt, cwd=self.dir)
 
 
-def open_pr(cfg, target: str, head: str, base: str, source: str, src: str, tk: Tokens) -> str:
-    """Open (or reuse) the sync PR for one branch and return its url."""
+def open_pr(cfg, target: str, head: str, base: str, source: str, src: str, tk: Tokens) -> dict:
+    """Open (or reuse) the sync PR for one branch and return it."""
     org = cfg["target_org"]
     existing = api(f"repos/{org}/{target}/pulls?state=open&head={org}:{head}&base={base}",
                    token=tk.pulls)
     if existing:
-        return existing[0]["html_url"]
+        return existing[0]
     body = (f"Content snapshot of `{cfg['source_org']}/{source}@{base}` at `{src}`, "
             f"three-way merged with this branch's own content.\n\n"
             f"Upstream history is not copied and no other branch is touched. "
             f"Merge to accept; a conflicting merge is never pushed.\n")
-    pr = api(f"repos/{org}/{target}/pulls", "POST",
-             {"title": f"Sync content from {cfg['source_org']}/{source}@{base}",
-              "head": head, "base": base, "body": body}, token=tk.pulls)
-    return pr["html_url"]
+    return api(f"repos/{org}/{target}/pulls", "POST",
+               {"title": f"Sync content from {cfg['source_org']}/{source}@{base}",
+                "head": head, "base": base, "body": body}, token=tk.pulls)
+
+
+def merge_pr(cfg, target: str, pr: dict, sha: str, tk: Tokens) -> str:
+    """Merge the sync PR with the bot token; returns '' on success, else the reason.
+
+    Rebase keeps the snapshot commit (and its Upstream-Commit trailer) as the branch
+    head instead of burying it under a merge commit. `sha` pins the merge to the
+    snapshot just pushed, so a head that moved in between is refused by GitHub.
+    """
+    org = cfg["target_org"]
+    try:
+        api(f"repos/{org}/{target}/pulls/{pr['number']}/merge", "PUT",
+            {"merge_method": "rebase", "sha": sha}, token=tk.bot)
+        return ""
+    except urllib.error.HTTPError as exc:
+        detail = redact(exc.read().decode(errors="replace"))
+        try:
+            detail = json.loads(detail).get("message", detail)
+        except ValueError:
+            pass
+        return f"{exc.code} {detail[:160]}"
 
 
 def default_branch(org: str, repo: str, tk: Tokens) -> str:
@@ -329,8 +361,10 @@ def cmd_status(cfg, mp, tk, args) -> list[dict]:
 
 def cmd_apply(cfg, mp, tk, args):
     args.keep = True
+    if args.auto_merge and not tk.bot:
+        sys.exit("--auto-merge needs GITHUB_SYNC_BOT_PAT (the codev-sync-bot token).")
     results = cmd_status(cfg, mp, tk, args)
-    changed, conflicts, pending, failed = [], [], [], []
+    changed, conflicts, pending, failed, merged, unmerged = [], [], [], [], [], []
     for res in results:
         if res["error"]:
             failed.append((res, res["error"]))
@@ -353,14 +387,24 @@ def cmd_apply(cfg, mp, tk, args):
                     print(f"  {label}: CONFLICT {str(exc).splitlines()[0][:120]}")
                     continue
                 if args.dry_run:
-                    print(f"  {label}: DRY-RUN would open a PR with a snapshot of {b['src'][:8]}")
+                    how = "open and merge" if args.auto_merge else "open"
+                    print(f"  {label}: DRY-RUN would {how} a PR with a snapshot of {b['src'][:8]}")
                 else:
                     sha = r.snapshot(tree, b["src"], b["sb"], parent=b["tgt"])
                     head = SYNC_BRANCH.format(branch=b["tb"])
                     r.push(sha, head, force=True)
-                    url = open_pr(cfg, res["target"], head, b["tb"], res["source"],
-                                  b["src"], tk)
+                    pr = open_pr(cfg, res["target"], head, b["tb"], res["source"],
+                                 b["src"], tk)
+                    url = pr["html_url"]
                     print(f"  {label}: PR {url} (snapshot {sha[:8]} <- {b['src'][:8]})")
+                    if args.auto_merge:
+                        why = merge_pr(cfg, res["target"], pr, sha, tk)
+                        if why:
+                            unmerged.append((res, b, url, why))
+                            print(f"  {label}: NOT MERGED ({why}) — PR left open")
+                        else:
+                            merged.append((res, b, url))
+                            print(f"  {label}: merged")
                 changed.append((res, b))
         except Exception as exc:
             # One unpushable repo (branch protection, push protection, revoked scope)
@@ -377,7 +421,10 @@ def cmd_apply(cfg, mp, tk, args):
         create_missing(cfg, mp, tk, args)
 
     print(f"\nPRs open/updated: {len(changed)} | conflicts: {len(conflicts)} | "
-          f"awaiting squash: {len(pending)} | failed: {len(failed)}")
+          f"awaiting squash: {len(pending)} | failed: {len(failed)}"
+          + (f" | merged: {len(merged)} | left open: {len(unmerged)}" if args.auto_merge else ""))
+    for res, b, url, why in unmerged:
+        print(f"  left open: {res['target']}@{b['tb']} {url}: {why}")
     for res, b in conflicts:
         print(f"  conflict: {res['source']} -> {res['target']}@{b['tb']}")
     for res, why in failed:
@@ -534,6 +581,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     ap.add_argument("--only", help="restrict to one repo (source or target name)")
     ap.add_argument("--create-missing", action="store_true", help="apply: also create/seed new_repos")
+    ap.add_argument("--auto-merge", action="store_true",
+                    help="apply: merge each sync PR immediately with GITHUB_SYNC_BOT_PAT")
     ap.add_argument("--yes", action="store_true", help="squash: confirm the irreversible rewrite")
     ap.add_argument("--again", action="store_true",
                     help="squash: re-squash branches that already have a snapshot marker")

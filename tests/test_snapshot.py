@@ -3,7 +3,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import io
 import unittest
+import unittest.mock
+import urllib.error
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -118,6 +121,45 @@ class SnapshotTest(unittest.TestCase):
         tree = self.r.merge_trees(self.r.tree(src), self.r.tree(tgt), self.r.tree(src2))
         files = S.run(["git", "ls-tree", "-r", "--name-only", tree], cwd=self.r.dir).split()
         self.assertNotIn("keep.txt", files)
+
+
+class AutoMergeTest(unittest.TestCase):
+    cfg = {"source_org": "SRC", "target_org": "TGT"}
+
+    def tokens(self, env):
+        with unittest.mock.patch.dict(os.environ, env, clear=True), \
+                unittest.mock.patch.object(S, "gh_cli_token", return_value=""):
+            return S.Tokens(self.cfg)
+
+    def test_bot_token_only_drives_pull_requests(self):
+        tk = self.tokens({"GH_TOKEN": "app", "GITHUB_MIRROR_PAT": "pat", "GITHUB_SYNC_BOT_PAT": "bot"})
+        self.assertEqual((tk.src, tk.tgt, tk.pulls, tk.bot), ("app", "pat", "bot", "bot"))
+        tk = self.tokens({"GH_TOKEN": "app"})
+        self.assertEqual((tk.pulls, tk.bot), ("app", ""))
+
+    def test_merge_pr_uses_bot_and_pins_sha(self):
+        calls = []
+
+        def fake_api(path, method="GET", body=None, token=""):
+            calls.append((path, method, body, token))
+            return {}
+
+        tk = self.tokens({"GH_TOKEN": "app", "GITHUB_SYNC_BOT_PAT": "bot"})
+        with unittest.mock.patch.object(S, "api", fake_api):
+            why = S.merge_pr(self.cfg, "repo", {"number": 7}, "abc123", tk)
+        self.assertEqual(why, "")
+        self.assertEqual(calls, [("repos/TGT/repo/pulls/7/merge", "PUT",
+                                  {"merge_method": "rebase", "sha": "abc123"}, "bot")])
+
+    def test_merge_refused_is_reported_not_raised(self):
+        def fake_api(path, method="GET", body=None, token=""):
+            raise urllib.error.HTTPError(path, 405, "", {}, io.BytesIO(
+                b'{"message":"At least 1 approving review is required"}'))
+
+        tk = self.tokens({"GH_TOKEN": "app", "GITHUB_SYNC_BOT_PAT": "bot"})
+        with unittest.mock.patch.object(S, "api", fake_api):
+            why = S.merge_pr(self.cfg, "repo", {"number": 7}, "abc123", tk)
+        self.assertEqual(why, "405 At least 1 approving review is required")
 
 
 if __name__ == "__main__":

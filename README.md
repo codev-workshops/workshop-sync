@@ -23,8 +23,11 @@ The sync is one-directional and copies *content*, never history:
   settings are out of scope.
 - **Synced branches are never pushed to directly.** A run puts the merged snapshot on
   `sync/upstream-<branch>` in the target and opens a pull request, so the default-branch
-  ruleset (PR + an approval from someone other than the last pusher) governs the sync too and a
-  human accepts every change.
+  ruleset (PR + an approval from someone other than the last pusher) governs the sync too.
+  The scheduled run passes `--auto-merge`, which merges that PR immediately as the dedicated
+  `codev-sync-bot` account — the only non-admin identity the ruleset lets bypass (see
+  [Auto-merge](#auto-merge-codev-sync-bot)). Without the flag, or when GitHub refuses the
+  merge, the PR stays open for a human.
 - **Target commits are preserved.** Each sync three-way merges the new upstream content against
   the previously recorded upstream content, so lab work committed in `codev-workshops` survives.
   Only a real content conflict is escalated to a human — renaming/archiving a target is never
@@ -55,6 +58,8 @@ ancestry, the two repos share no commits at all.
 | source moved on | three-way merge of trees, one new commit appended |
 | the merge conflicts | reported for a human; nothing pushed |
 | a sync PR is already open for that branch | the branch is updated, the PR is reused |
+| `--auto-merge` and the bot may bypass | the PR is rebase-merged at once; the PR remains as the audit trail |
+| `--auto-merge` but GitHub refuses the merge | reported as `left open`; the PR waits for a human |
 | no `Upstream-Commit:` marker anywhere in the branch | reported; run `squash` for that repo first |
 
 `sync: off` on a pair excludes it entirely.
@@ -100,6 +105,7 @@ pip install pyyaml
 scripts/sync_from_source.py status               # read-only classification of every pair
 scripts/sync_from_source.py apply --dry-run      # what a run would change
 scripts/sync_from_source.py apply                # open/refresh a sync PR per branch
+scripts/sync_from_source.py apply --auto-merge   # …and merge it as codev-sync-bot (scheduled run)
 scripts/sync_from_source.py apply --create-missing   # also seed repos under new_repos:
 scripts/sync_from_source.py squash --yes         # one-time: drop imported upstream history
 scripts/sync_from_source.py discover             # find upstream renames / unmapped repos
@@ -117,21 +123,49 @@ the default-branch ruleset lets force-push, which now means an org-admin one.
 Set `SYNC_GITHUB_BASE=https://github.com` if your environment does not rewrite github.com
 through a credential proxy.
 
+### Auto-merge (`codev-sync-bot`)
+
+Waiting for a peer approval on every sync PR meant targets silently fell behind, so the
+scheduled run merges its own PRs. GitHub cannot grant a bypass to a *token* — bypass actors are
+roles, teams and apps, and a PAT simply acts as its owner — so the bypass is tied to an account
+that does nothing else:
+
+- `codev-sync-bot` is a machine user, a plain member of `codev-workshops`, and the only member
+  of the team `upstream-sync`.
+- `apply_rulesets.py --bypass-team upstream-sync` adds that team (`bypass_mode: always`) next
+  to org admins on every `protect-default-branch` ruleset and strips any other Team or
+  Integration actor. Nothing else — no human, no Devin App — gains a bypass.
+- `GITHUB_SYNC_BOT_PAT` is the bot's fine-grained PAT (`codev-workshops`, all repositories,
+  Contents: write, Pull requests: write). It is stored as a secret **scoped to the upstream-sync
+  automation only**, so no other session or automation in the org holds it, and the script uses
+  it for exactly two calls: open the sync PR and merge it (`PUT …/pulls/N/merge`, rebase, pinned
+  to the snapshot SHA). Pushing `sync/upstream-*`, reading the source and everything else keep
+  using the ambient token / `GITHUB_MIRROR_PAT`.
+- `--auto-merge` exits early if the bot token is missing, so a misconfigured run degrades to the
+  review-required behaviour instead of pushing anything.
+
+What this does *not* change: the sync still never writes to the source org, never touches a
+branch outside the default/`main`/`develop` scope, never force-pushes anything but its own
+`sync/upstream-*`, and still leaves conflicts and push-protection rejections to a human. Those
+guardrails in the script are now the review, so changes to `sync_from_source.py` itself deserve
+a careful look.
+
 ## Default-branch protection
 
 [`scripts/apply_rulesets.py`](scripts/apply_rulesets.py) puts the same `protect-default-branch`
 ruleset on every non-archived `codev-workshops` repo — PR required, 1 approval, approval from
-someone other than the last pusher, no deletion, no non-fast-forward — with **org admins as the
-only bypass actor**. Run it after a new repo appears:
+someone other than the last pusher, no deletion, no non-fast-forward — with **org admins and the
+`upstream-sync` team as the only bypass actors**. Run it after a new repo appears:
 
 ```bash
-GITHUB_MIRROR_PAT=… scripts/apply_rulesets.py
+GITHUB_MIRROR_PAT=… scripts/apply_rulesets.py --bypass-team upstream-sync
 ```
 
-It also strips `Integration` bypass actors. There used to be one for the Devin GitHub App (so
-the sync could push directly), and because bypass is ruleset-wide it let any Devin session merge
-into a default branch with zero reviews. That is why the sync goes through PRs now; never re-add
-an app as a bypass actor.
+It also strips `Integration` bypass actors and any Team actor other than the one passed. There
+used to be an Integration actor for the Devin GitHub App (so the sync could push directly), and
+because bypass is ruleset-wide it let any Devin session merge into a default branch with zero
+reviews. That is why the sync's bypass is now a single-purpose account instead; never re-add an
+app as a bypass actor.
 
 Rulesets need GitHub Team on private repos: 20 private repos in the org answer
 `403 Upgrade to GitHub Pro or make this repository public` and are therefore unprotected.
