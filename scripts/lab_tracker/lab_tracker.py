@@ -123,23 +123,44 @@ class Module:
     workshops: list[tuple[str, str, str]]  # (workshop README path, workshop title, lab id)
 
 
+def heading(line: str) -> tuple[int, str] | None:
+    """('## Foo' -> (2, 'Foo')); None for non-heading lines."""
+    stripped = line.lstrip("#")
+    level = len(line) - len(stripped)
+    if 0 < level <= 6 and stripped.startswith(" "):
+        return level, stripped.strip()
+    return None
+
+
 def h1(text: str) -> str:
-    m = re.search(r"^#\s+(.+)$", text, re.M)
-    return m.group(1).strip() if m else ""
+    for line in text.splitlines():
+        if (h := heading(line)) and h[0] == 1:
+            return h[1]
+    return ""
+
+
+def section_body(text: str, name: str, levels=(2,)) -> str:
+    """Lines under the first heading whose title starts with `name`, up to the next heading of the same or higher level."""
+    body: list[str] = []
+    level = 0
+    for line in text.splitlines():
+        h = heading(line)
+        if level:
+            if h and h[0] <= level:
+                break
+            body.append(line)
+        elif h and h[0] in levels and h[1].startswith(name):
+            level = h[0]
+    return "\n".join(body)
 
 
 def section(text: str, names=("Challenge", "Objective", "Goal")) -> str:
     for n in names:
-        m = re.search(rf"^#{{2,3}}\s+{n}[^\n]*\n+(.+?)(?=\n#|\Z)", text, re.S | re.M)
-        if m:
-            para = m.group(1).strip().split("\n\n")[0]
-            return re.sub(r"\s+", " ", re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", para))
+        body = section_body(text, n, levels=(2, 3)).strip()
+        if body:
+            para = body.split("\n\n")[0]
+            return " ".join(re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", para).split())
     return ""
-
-
-def section_body(text: str, name: str) -> str:
-    m = re.search(rf"^##\s+{name}\s*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
-    return m.group(1) if m else ""
 
 
 def readme_tables(readme: str):
@@ -173,7 +194,7 @@ def load_repo(root: Path) -> tuple[dict[str, Module], dict[str, str]]:
         workshops[rel] = title
         current_lab = ""
         for line in text.splitlines():
-            if m := re.match(r"^#{2,4}\s+.*?\bLab\s+([A-Z]?\d+[A-Z]?)\b", line):
+            if (h := heading(line)) and (m := re.search(r"\bLab ([A-Z]?\d+[A-Z]?)\b", h[1])):
                 current_lab = m.group(1)
             for target in re.findall(r"\]\(((?:\.\./)+labs/[^)#]+\.md)", line):
                 mod = (rd.parent / target).resolve().relative_to(root.resolve()).as_posix()
@@ -195,7 +216,11 @@ def load_repo(root: Path) -> tuple[dict[str, Module], dict[str, str]]:
             difficulty, duration = meta.get(f.name, ("", ""))
             difficulty = section(text, ("Difficulty",)) or difficulty
             duration = section(text, ("Estimated Time",)) or duration
-            mod_repos = re.findall(r"^###\s+(?:<a[^>]*></a>)?\s*([\w.-]+)\s*$", section_body(text, "Repositories"), re.M)
+            mod_repos = [
+                re.sub(r"<a [^>]*></a>", "", h[1]).strip()
+                for line in section_body(text, "Repositories").splitlines()
+                if (h := heading(line)) and h[0] == 3
+            ]
             modules[rel] = Module(
                 path=rel,
                 discipline=disc.name,
@@ -209,7 +234,12 @@ def load_repo(root: Path) -> tuple[dict[str, Module], dict[str, str]]:
     return modules, workshops
 
 
+SINCE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}|\d+ (hour|day|week|month)s? ago)$")
+
+
 def git_changed_since(root: Path, since: str) -> list[str]:
+    if not SINCE_RE.match(since):
+        sys.exit(f"--since must look like '8 days ago' or 2026-01-31, got {since!r}")
     out = subprocess.run(
         ["git", "log", f"--since={since}", "--name-only", "--format=", "--", "labs", "workshops"],
         cwd=root, capture_output=True, text=True, check=True,
@@ -253,7 +283,13 @@ def main() -> int:
     ap.add_argument("--out", type=Path, help="output directory (default: next to --sheet)")
     ap.add_argument("--since", help="git --since gate for change detection, e.g. '8 days ago'; omit to always run it")
     args = ap.parse_args()
-    out = args.out or args.sheet.parent
+    args.repo = args.repo.resolve()
+    args.sheet = args.sheet.resolve()
+    if not (args.repo / "labs").is_dir() or not (args.repo / "workshops").is_dir():
+        sys.exit(f"--repo {args.repo} is not a workshop-content checkout (no labs/ and workshops/)")
+    if args.sheet.suffix != ".html" or not args.sheet.is_file():
+        sys.exit(f"--sheet {args.sheet} must be the .html file written by read_sheet.mjs")
+    out = (args.out or args.sheet.parent).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
     header, col, data = load_sheet(args.sheet)
