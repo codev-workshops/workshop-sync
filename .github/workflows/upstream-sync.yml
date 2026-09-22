@@ -1,0 +1,139 @@
+# Scheduled upstream sync: Cognition-Partner-Workshops -> codev-workshops.
+#
+# The routine path (classify every pair, fast-forward the ones that moved, seed new
+# repos) runs here without a Devin session. Only when the run needs judgement —
+# a content conflict, a refused push/merge, a branch without a snapshot marker, a
+# repo missing from the map — does it open an issue in this repo; the Devin
+# automation is triggered by that issue and follows the playbook for exactly the
+# items listed.
+#
+# Secrets (Settings -> Secrets and variables -> Actions); GitHub reserves the
+# `GITHUB_` prefix, hence the names:
+#   SYNC_UPSTREAM_READ_PAT  read access to Cognition-Partner-Workshops (contents) —
+#                           becomes GH_TOKEN, the "ambient" token of the script
+#   SYNC_MIRROR_PAT         -> GITHUB_MIRROR_PAT (target org contents + administration)
+#   SYNC_BOT_PAT            -> GITHUB_SYNC_BOT_PAT (sync bot: direct pushes, PR merges)
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: "41 6 * * 0"   # Sundays 06:41 UTC; bi-weekly gate below
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "restrict to one repo (source or target name)"
+        required: false
+      dry_run:
+        description: "report only, change nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Bi-weekly gate (even ISO weeks only, unless dispatched by hand)
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ $(( $(date -u +%V) % 2 )) -eq 0 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "odd ISO week — skipping"; echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        if: steps.gate.outputs.run == 'true'
+        run: pip install --only-binary :all: pyyaml==6.0.2
+
+      - name: Apply
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_READ_PAT }}
+          GITHUB_MIRROR_PAT: ${{ secrets.SYNC_MIRROR_PAT }}
+          GITHUB_SYNC_BOT_PAT: ${{ secrets.SYNC_BOT_PAT }}
+          ONLY: ${{ inputs.only }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -o pipefail
+          flags="--direct-push --auto-merge --create-missing --report report.json"
+          [ -n "$ONLY" ] && flags="$flags --only=$ONLY"
+          [ "$DRY_RUN" = "true" ] && flags="$flags --dry-run"
+          python scripts/sync_from_source.py apply $flags 2>&1 | tee apply.log
+
+      - name: Discover
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_READ_PAT }}
+          GITHUB_MIRROR_PAT: ${{ secrets.SYNC_MIRROR_PAT }}
+        run: python scripts/sync_from_source.py discover --report report.json 2>&1 | tee discover.log
+
+      - name: Summary
+        if: steps.gate.outputs.run == 'true' && always()
+        run: |
+          {
+            echo '## Upstream sync'
+            echo '```'
+            grep -E '^(updated:|  pushed:|  left open:|  conflict:|  failed:|  FAILED)' apply.log || true
+            echo '```'
+            echo '### Discover'
+            echo '```'; cat discover.log 2>/dev/null || true; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.run == 'true' && always()
+        with:
+          name: upstream-sync-${{ github.run_id }}
+          path: |
+            apply.log
+            discover.log
+            report.json
+          if-no-files-found: ignore
+
+      - name: Escalate to Devin when the run needs attention
+        if: steps.gate.outputs.run == 'true' && always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f report.json ]; then
+            attention='["run-crashed"]'
+          else
+            attention=$(python -c 'import json;print(json.dumps(json.load(open("report.json"))["needs_attention"]))')
+          fi
+          if [ "$attention" = "[]" ]; then
+            echo "nothing needs attention"; exit 0
+          fi
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          {
+            echo "The scheduled sync run needs a look: \`$attention\`."
+            echo
+            echo "Run: $run_url (logs and \`report.json\` are attached as an artifact)."
+            echo
+            echo '```json'; cat report.json 2>/dev/null || echo '{"error": "apply did not finish"}'; echo '```'
+            echo
+            echo '<details><summary>apply.log</summary>'; echo; echo '```'
+            tail -n 200 apply.log 2>/dev/null || true
+            echo '```'; echo '</details>'
+          } > issue.md
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Upstream sync needs attention ($(date -u +%F), run ${{ github.run_id }})" \
+            --label sync-attention --body-file issue.md \
+          || gh issue create --repo "${{ github.repository }}" \
+            --title "Upstream sync needs attention ($(date -u +%F), run ${{ github.run_id }})" \
+            --body-file issue.md
