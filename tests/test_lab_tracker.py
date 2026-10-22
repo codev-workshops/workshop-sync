@@ -30,9 +30,9 @@ def tr(cells):
     return "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
 
 
-def sheet_html(rows):
+def sheet_html(rows, header=HEADER):
     title = '<tr><td></td><td></td><td></td><td></td><td colspan="22">Hands-On Exercise Tracker</td></tr>'
-    return "<table>" + title + tr(HEADER) + "".join(tr(r) for r in rows) + "</table>"
+    return "<table>" + title + tr(header) + "".join(tr(r) for r in rows) + "</table>"
 
 
 def data_row(order, exercise, repos, duration, workshops, path, notes="a<br>b"):
@@ -102,9 +102,9 @@ class LabTrackerTest(unittest.TestCase):
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"],
                        cwd=self.repo, check=True)
 
-    def run_diff(self, rows, *extra):
+    def run_diff(self, rows, *extra, header=HEADER):
         sheet = self.tmp / "sheet.html"
-        sheet.write_text(sheet_html(rows), encoding="utf-8")
+        sheet.write_text(sheet_html(rows, header), encoding="utf-8")
         out = self.tmp / "out"
         r = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(self.repo), "--sheet", str(sheet),
                             "--out", str(out), *extra], capture_output=True, text=True, encoding="utf-8")
@@ -141,6 +141,14 @@ class LabTrackerTest(unittest.TestCase):
         self.assertIn(f'=HYPERLINK("{LT.BLOB}{WS}";"Workshop: App Maintenance — Lab 2")', cells[8])
         self.assertEqual(cells[9], f'=HYPERLINK("{LT.BLOB}labs/architecture-design/beta.md";"Open exercise")')
         self.assertEqual([cells[i] for i in (10, 14, 18, 22)], ["Not Started"] * 4)
+
+    def test_lab_index_header(self):
+        rows = [data_row(5, "Alpha", "timesheet-app", "45 minutes", [WS], "labs/architecture-design/alpha.md")]
+        code, rep, out = self.run_diff(rows, header=["Lab Index"] + HEADER[1:])
+        self.assertEqual(code, 10)
+        self.assertEqual(rep["sheet_rows"], 1)
+        cells = (out / "new_rows.tsv").read_text(encoding="utf-8").rstrip("\n").split("\t")
+        self.assertEqual(cells[0], "6")
 
     def test_changes_reported_and_since_gate(self):
         rows = [data_row(1, "Alpha (old)", "timesheet-app, gone-repo", "30 minutes", [], "labs/architecture-design/alpha.md"),

@@ -86,16 +86,20 @@ class SheetHTML(HTMLParser):
             self._cell.text += data
 
 
+ORDER_HEADERS = ("Lab Order", "Lab Index")  # first header cell; the team renamed it once
+
+
 def load_sheet(path: Path):
     p = SheetHTML()
     p.feed(path.read_text(encoding="utf-8", errors="replace"))
     for i, row in enumerate(p.rows):
-        if row and row[0].text == "Lab Order":
+        if row and row[0].text in ORDER_HEADERS:
             header = [c.text for c in row]
             break
     else:
-        sys.exit("header row (first cell 'Lab Order') not found in sheet HTML")
+        sys.exit(f"header row (first cell one of {ORDER_HEADERS}) not found in sheet HTML")
     col = {name: idx for idx, name in enumerate(header) if name}
+    col["Lab Order"] = 0
     col["Appears In"] = next(i for n, i in col.items() if n.startswith("Appears In"))
     data = []
     for j, row in enumerate(p.rows[i + 1 :], start=i + 2):  # sheet row numbers are 1-based
