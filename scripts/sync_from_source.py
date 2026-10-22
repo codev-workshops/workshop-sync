@@ -70,6 +70,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -80,6 +81,14 @@ API = "https://api.github.com"
 # github.com through a credential-injecting proxy.
 GIT_BASE = os.environ.get("SYNC_GITHUB_BASE", "https://github.com:443")
 MAP_PATH = Path(__file__).resolve().parent.parent / "catalog" / "sync-map.yaml"
+
+
+def editable_map(args) -> Path:
+    """The map file `discover --auto-map` / `apply --create-missing` may rewrite."""
+    if Path(args.map).resolve() != MAP_PATH.resolve():
+        sys.exit(f"--auto-map/--create-missing edit only {MAP_PATH}; got --map {args.map}")
+    return MAP_PATH
+
 
 # Besides the default branch, only these may be synced.
 EXTRA_BRANCHES = ("main", "develop")
@@ -638,6 +647,201 @@ def write_report(path: str, command: str, data: dict):
     p.write_text(json.dumps(report, indent=2) + "\n")
 
 
+def add_new_repos(map_text: str, names: list[str], today: str) -> str:
+    """Append new source names to the map without rewriting its comments or formatting."""
+    if not names:
+        return map_text
+
+    parsed = yaml.safe_load(map_text) or {}
+    existing = {
+        entry["source"] for entry in (parsed.get("new_repos") or [])
+        if isinstance(entry, dict) and "source" in entry
+    }
+    additions = sorted(set(names) - existing)
+    if not additions:
+        return map_text
+
+    lines = map_text.splitlines(keepends=True)
+    line_text = lambda line: line.rstrip("\r\n")
+    section = next((i for i, line in enumerate(lines)
+                    if re.match(r"^new_repos:(?:[ \t]*\[[ \t]*\])?[ \t]*(?:#.*)?$",
+                                line_text(line))), None)
+    if section is None:
+        raise ValueError("map has no top-level new_repos: section")
+
+    next_key = next((i for i in range(section + 1, len(lines))
+                     if re.match(r"^[A-Za-z_][\w-]*\s*:", line_text(lines[i]))), len(lines))
+    insert_at = next_key
+    while insert_at > section + 1:
+        previous = line_text(lines[insert_at - 1])
+        if not previous.strip() or previous.startswith("#"):
+            insert_at -= 1
+        else:
+            break
+
+    section_text = line_text(lines[section])
+    empty_list = re.match(r"^(new_repos:)[ \t]*\[[ \t]*\][ \t]*(#.*)?$", section_text)
+    if empty_list:
+        ending = lines[section][len(section_text):]
+        comment = f" {empty_list.group(2)}" if empty_list.group(2) else ""
+        lines[section] = f"{empty_list.group(1)}{comment}{ending}"
+
+    newline = "\r\n" if "\r\n" in map_text else "\n"
+    if insert_at and not lines[insert_at - 1].endswith(("\n", "\r")):
+        lines[insert_at - 1] += newline
+    additions_text = [
+        f"  # auto-mapped {today} by discover --auto-map{newline}",
+        *(f"  - source: {name}{newline}" for name in additions),
+    ]
+    lines[insert_at:insert_at] = additions_text
+    updated = "".join(lines)
+    return re.sub(
+        r"(?m)^(# Last verified: )\d{4}-\d{2}-\d{2}(?=[ \t]*(?:\r?$))",
+        rf"\g<1>{today}",
+        updated,
+        count=1,
+    )
+
+
+def move_to_pairs(map_text: str, entries: list[dict], today: str) -> str:
+    """Move successfully seeded entries into pairs while preserving the map's text."""
+    if not entries:
+        return map_text
+
+    parsed = yaml.safe_load(map_text) or {}
+    new_entries = parsed.get("new_repos") or []
+    new_sources = {entry["source"] for entry in new_entries if isinstance(entry, dict)
+                   and "source" in entry}
+    moved, seen = [], set()
+    for entry in entries:
+        source = entry.get("source")
+        if source in new_sources and source not in seen:
+            moved.append(entry)
+            seen.add(source)
+    if not moved:
+        return map_text
+    moved_sources = {entry["source"] for entry in moved}
+
+    lines = map_text.splitlines(keepends=True)
+    line_text = lambda line: line.rstrip("\r\n")
+    top_level_key = re.compile(r"^[A-Za-z_][\w-]*\s*:")
+
+    def section_bounds(name):
+        section = next((i for i, line in enumerate(lines)
+                        if re.match(rf"^{re.escape(name)}:(?:[ \t]*\[[ \t]*\])?[ \t]*(?:#.*)?$",
+                                    line_text(line))), None)
+        if section is None:
+            raise ValueError(f"map has no top-level {name}: section")
+        end = next((i for i in range(section + 1, len(lines))
+                    if top_level_key.match(line_text(lines[i]))), len(lines))
+        return section, end
+
+    new_section, new_end = section_bounds("new_repos")
+    item_starts = []
+    for i in range(new_section + 1, new_end):
+        body = line_text(lines[i])
+        if not re.match(r"^  -\s+source\s*:", body):
+            continue
+        try:
+            parsed_item = yaml.safe_load(body.strip())
+            item = parsed_item[0] if isinstance(parsed_item, list) else parsed_item
+            source = item.get("source") if isinstance(item, dict) else None
+        except (AttributeError, TypeError, yaml.YAMLError):
+            source = None
+        item_starts.append((i, source))
+
+    removed_lines = set()
+    rewrites = {}
+    for position, (start, source) in enumerate(item_starts):
+        if source not in moved_sources:
+            continue
+        end = item_starts[position + 1][0] if position + 1 < len(item_starts) else new_end
+        removed_lines.add(start)
+        for i in range(start + 1, end):
+            body = line_text(lines[i])
+            if body.strip() and len(body) - len(body.lstrip(" ")) >= 4:
+                removed_lines.add(i)
+
+        rewrite_start = next((i for i in range(start + 1, end)
+                              if re.match(r"^    rewrite\s*:", line_text(lines[i]))), None)
+        if rewrite_start is not None:
+            rewrite_end = rewrite_start + 1
+            while rewrite_end < end:
+                body = line_text(lines[rewrite_end])
+                if not body.strip():
+                    lookahead = rewrite_end + 1
+                    while lookahead < end and not line_text(lines[lookahead]).strip():
+                        lookahead += 1
+                    if lookahead < end:
+                        following = line_text(lines[lookahead])
+                        indent = len(following) - len(following.lstrip(" "))
+                        if indent > 4:
+                            rewrite_end += 1
+                            continue
+                    break
+                indent = len(body) - len(body.lstrip(" "))
+                if indent > 4:
+                    rewrite_end += 1
+                else:
+                    break
+            rewrites[source] = lines[rewrite_start:rewrite_end]
+
+    auto_comments = [
+        i for i in range(new_section + 1, new_end)
+        if re.match(r"^  # auto-mapped\b", line_text(lines[i]))
+    ]
+    for position, comment in enumerate(auto_comments):
+        end = auto_comments[position + 1] if position + 1 < len(auto_comments) else new_end
+        group_sources = [source for start, source in item_starts if comment < start < end]
+        if group_sources and all(source in moved_sources for source in group_sources):
+            removed_lines.add(comment)
+    lines = [line for i, line in enumerate(lines) if i not in removed_lines]
+
+    pairs_section = next((i for i, line in enumerate(lines)
+                          if re.match(r"^pairs:(?:[ \t]*\[[ \t]*\])?[ \t]*(?:#.*)?$",
+                                      line_text(line))), None)
+    if pairs_section is None:
+        raise ValueError("map has no top-level pairs: section")
+    pairs_end = next((i for i in range(pairs_section + 1, len(lines))
+                      if top_level_key.match(line_text(lines[i]))), len(lines))
+    insert_at = pairs_end
+    while insert_at > pairs_section + 1:
+        previous = line_text(lines[insert_at - 1])
+        if not previous.strip() or previous.startswith("#"):
+            insert_at -= 1
+        else:
+            break
+
+    section_text = line_text(lines[pairs_section])
+    empty_list = re.match(r"^(pairs:)[ \t]*\[[ \t]*\][ \t]*(#.*)?$", section_text)
+    if empty_list:
+        ending = lines[pairs_section][len(section_text):]
+        comment = f" {empty_list.group(2)}" if empty_list.group(2) else ""
+        lines[pairs_section] = f"{empty_list.group(1)}{comment}{ending}"
+
+    newline = "\r\n" if "\r\n" in map_text else "\n"
+    if insert_at and not lines[insert_at - 1].endswith(("\n", "\r")):
+        lines[insert_at - 1] += newline
+    additions_text = []
+    for entry in moved:
+        source = entry["source"]
+        target = entry.get("target", source)
+        additions_text.extend([
+            f"  - source: {source}{newline}",
+            f"    target: {target}{newline}",
+            f"    # seeded {today} as a content snapshot{newline}",
+            *rewrites.get(source, []),
+        ])
+    lines[insert_at:insert_at] = additions_text
+    updated = "".join(lines)
+    return re.sub(
+        r"(?m)^(# Last verified: )\d{4}-\d{2}-\d{2}(?=[ \t]*(?:\r?$))",
+        rf"\g<1>{today}",
+        updated,
+        count=1,
+    )
+
+
 def cmd_squash(cfg, mp, tk, args):
     """Drop imported upstream history: one snapshot commit of the target's own content.
 
@@ -685,6 +889,7 @@ def cmd_squash(cfg, mp, tk, args):
 def create_missing(cfg, mp, tk, args) -> list[str]:
     """Create and seed every `new_repos` entry; returns the entries that failed."""
     failed = []
+    seeded = []
     if not tk.can_create:
         print("  GITHUB_MIRROR_PAT is not set — repo creation needs Administration:write; skipping")
         return failed
@@ -709,9 +914,20 @@ def create_missing(cfg, mp, tk, args) -> list[str]:
         try:
             seed(cfg, source, target, tk, Rewrite(cfg, mp, entry.get("rewrite")))
             print(f"  seeded {source} -> {target}")
+            seeded.append(entry)
         except Exception as exc:
             failed.append(f"{source} -> {target}: {redact(str(exc)).splitlines()[-1][:200]}")
             print(f"  FAILED {failed[-1]}")
+    if not args.dry_run and seeded:
+        map_path = editable_map(args)
+        updated_map = move_to_pairs(
+            map_path.read_text(encoding="utf-8"),
+            seeded,
+            datetime.now(timezone.utc).date().isoformat(),
+        )
+        map_path.write_text(updated_map, encoding="utf-8")
+        for entry in seeded:
+            print(f"  moved to pairs: {entry['source']}")
     return failed
 
 
@@ -775,6 +991,27 @@ def cmd_discover(cfg, mp, tk, args):
             print(f"  - {g}")
 
     unmapped = sorted(src - mapped_src)
+    auto_map = getattr(args, "auto_map", False)
+    auto_mapped = []
+    if auto_map:
+        ignored_targets = set(mp.get("ignore_targets") or [])
+        candidates = [name for name in unmapped if name not in tgt and name not in ignored_targets]
+        if args.dry_run:
+            for name in candidates:
+                print(f"DRY-RUN would auto-map: {name}")
+        elif candidates:
+            map_path = editable_map(args)
+            updated_map = add_new_repos(
+                map_path.read_text(encoding="utf-8"),
+                candidates,
+                datetime.now(timezone.utc).date().isoformat(),
+            )
+            map_path.write_text(updated_map, encoding="utf-8")
+            auto_mapped = candidates
+            for name in auto_mapped:
+                print(f"auto-mapped: {name}")
+        unmapped = [name for name in unmapped if name not in auto_mapped]
+
     if unmapped:
         print("\nsource repos missing from the map:")
         for s in unmapped:
@@ -784,7 +1021,10 @@ def cmd_discover(cfg, mp, tk, args):
     if not gone and not unmapped:
         print("map is complete: every source repo is either paired or listed under new_repos")
     if args.report:
-        write_report(args.report, "discover", {"gone": sorted(gone), "unmapped": unmapped})
+        data = {"gone": sorted(gone), "unmapped": unmapped}
+        if auto_map:
+            data["auto_mapped"] = auto_mapped
+        write_report(args.report, "discover", data)
 
 
 def cmd_publish_map(cfg, mp, tk, args):
@@ -849,8 +1089,14 @@ def cmd_publish_map(cfg, mp, tk, args):
         why = merge_pr({"target_org": org}, name, pr, sha, tk)
         if why:
             print(f"NOT MERGED ({why}) — PR left open")
+            if args.report:
+                write_report(args.report, "publish-map", {
+                    "left_open": [f"workshop-sync map PR {pr['html_url']}: {why}"],
+                })
         else:
             print("merged")
+            if args.report:
+                write_report(args.report, "publish-map", {"left_open": []})
             run(["git", "fetch", "-q", "origin", base], cwd=root, check=False)
 
 
@@ -861,6 +1107,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     ap.add_argument("--only", help="restrict to one repo (source or target name)")
     ap.add_argument("--create-missing", action="store_true", help="apply: also create/seed new_repos")
+    ap.add_argument("--auto-map", action="store_true",
+                    help="discover: add unmapped source repos with no same-name target to new_repos:")
     ap.add_argument("--auto-merge", action="store_true",
                     help="apply: merge each sync PR immediately with GITHUB_SYNC_BOT_PAT")
     ap.add_argument("--direct-push", action="store_true",
@@ -873,7 +1121,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
                     help=f"status/apply: pairs classified concurrently (default {DEFAULT_JOBS})")
     ap.add_argument("--report", metavar="FILE",
-                    help="apply/discover: also write a JSON summary (merged into FILE if it exists)")
+                    help="apply/discover/publish-map: write a JSON summary (merged into FILE if it exists)")
     ap.add_argument("--map", default=str(MAP_PATH))
     args = ap.parse_args()
     args.keep = False
