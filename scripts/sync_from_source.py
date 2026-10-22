@@ -695,6 +695,145 @@ def add_new_repos(map_text: str, names: list[str], today: str) -> str:
     )
 
 
+def move_to_pairs(map_text: str, entries: list[dict], today: str) -> str:
+    """Move successfully seeded entries into pairs while preserving the map's text."""
+    if not entries:
+        return map_text
+
+    parsed = yaml.safe_load(map_text) or {}
+    new_entries = parsed.get("new_repos") or []
+    new_sources = {entry["source"] for entry in new_entries if isinstance(entry, dict)
+                   and "source" in entry}
+    moved, seen = [], set()
+    for entry in entries:
+        source = entry.get("source")
+        if source in new_sources and source not in seen:
+            moved.append(entry)
+            seen.add(source)
+    if not moved:
+        return map_text
+    moved_sources = {entry["source"] for entry in moved}
+
+    lines = map_text.splitlines(keepends=True)
+    line_text = lambda line: line.rstrip("\r\n")
+    top_level_key = re.compile(r"^[A-Za-z_][\w-]*\s*:")
+
+    def section_bounds(name):
+        section = next((i for i, line in enumerate(lines)
+                        if re.match(rf"^{re.escape(name)}:\s*(?:\[\s*\])?\s*(?:#.*)?$",
+                                    line_text(line))), None)
+        if section is None:
+            raise ValueError(f"map has no top-level {name}: section")
+        end = next((i for i in range(section + 1, len(lines))
+                    if top_level_key.match(line_text(lines[i]))), len(lines))
+        return section, end
+
+    new_section, new_end = section_bounds("new_repos")
+    item_starts = []
+    for i in range(new_section + 1, new_end):
+        body = line_text(lines[i])
+        if not re.match(r"^  -\s+source\s*:", body):
+            continue
+        try:
+            parsed_item = yaml.safe_load(body.strip())
+            item = parsed_item[0] if isinstance(parsed_item, list) else parsed_item
+            source = item.get("source") if isinstance(item, dict) else None
+        except (AttributeError, TypeError, yaml.YAMLError):
+            source = None
+        item_starts.append((i, source))
+
+    removed_lines = set()
+    rewrites = {}
+    for position, (start, source) in enumerate(item_starts):
+        if source not in moved_sources:
+            continue
+        end = item_starts[position + 1][0] if position + 1 < len(item_starts) else new_end
+        removed_lines.add(start)
+        for i in range(start + 1, end):
+            body = line_text(lines[i])
+            if body.strip() and len(body) - len(body.lstrip(" ")) >= 4:
+                removed_lines.add(i)
+
+        rewrite_start = next((i for i in range(start + 1, end)
+                              if re.match(r"^    rewrite\s*:", line_text(lines[i]))), None)
+        if rewrite_start is not None:
+            rewrite_end = rewrite_start + 1
+            while rewrite_end < end:
+                body = line_text(lines[rewrite_end])
+                if not body.strip():
+                    lookahead = rewrite_end + 1
+                    while lookahead < end and not line_text(lines[lookahead]).strip():
+                        lookahead += 1
+                    if lookahead < end:
+                        following = line_text(lines[lookahead])
+                        indent = len(following) - len(following.lstrip(" "))
+                        if indent > 4:
+                            rewrite_end += 1
+                            continue
+                    break
+                indent = len(body) - len(body.lstrip(" "))
+                if indent > 4:
+                    rewrite_end += 1
+                else:
+                    break
+            rewrites[source] = lines[rewrite_start:rewrite_end]
+
+    auto_comments = [
+        i for i in range(new_section + 1, new_end)
+        if re.match(r"^  # auto-mapped\b", line_text(lines[i]))
+    ]
+    for position, comment in enumerate(auto_comments):
+        end = auto_comments[position + 1] if position + 1 < len(auto_comments) else new_end
+        group_sources = [source for start, source in item_starts if comment < start < end]
+        if group_sources and all(source in moved_sources for source in group_sources):
+            removed_lines.add(comment)
+    lines = [line for i, line in enumerate(lines) if i not in removed_lines]
+
+    pairs_section = next((i for i, line in enumerate(lines)
+                          if re.match(r"^pairs:\s*(?:\[\s*\])?\s*(?:#.*)?$",
+                                      line_text(line))), None)
+    if pairs_section is None:
+        raise ValueError("map has no top-level pairs: section")
+    pairs_end = next((i for i in range(pairs_section + 1, len(lines))
+                      if top_level_key.match(line_text(lines[i]))), len(lines))
+    insert_at = pairs_end
+    while insert_at > pairs_section + 1:
+        previous = line_text(lines[insert_at - 1])
+        if not previous.strip() or previous.startswith("#"):
+            insert_at -= 1
+        else:
+            break
+
+    section_text = line_text(lines[pairs_section])
+    empty_list = re.match(r"^(pairs:)\s*\[\s*\]\s*(#.*)?$", section_text)
+    if empty_list:
+        ending = lines[pairs_section][len(section_text):]
+        comment = f" {empty_list.group(2)}" if empty_list.group(2) else ""
+        lines[pairs_section] = f"{empty_list.group(1)}{comment}{ending}"
+
+    newline = "\r\n" if "\r\n" in map_text else "\n"
+    if insert_at and not lines[insert_at - 1].endswith(("\n", "\r")):
+        lines[insert_at - 1] += newline
+    additions_text = []
+    for entry in moved:
+        source = entry["source"]
+        target = entry.get("target", source)
+        additions_text.extend([
+            f"  - source: {source}{newline}",
+            f"    target: {target}{newline}",
+            f"    # seeded {today} as a content snapshot{newline}",
+            *rewrites.get(source, []),
+        ])
+    lines[insert_at:insert_at] = additions_text
+    updated = "".join(lines)
+    return re.sub(
+        r"(?m)^(# Last verified: )\d{4}-\d{2}-\d{2}(?=[ \t]*(?:\r?$))",
+        rf"\g<1>{today}",
+        updated,
+        count=1,
+    )
+
+
 def cmd_squash(cfg, mp, tk, args):
     """Drop imported upstream history: one snapshot commit of the target's own content.
 
@@ -742,6 +881,7 @@ def cmd_squash(cfg, mp, tk, args):
 def create_missing(cfg, mp, tk, args) -> list[str]:
     """Create and seed every `new_repos` entry; returns the entries that failed."""
     failed = []
+    seeded = []
     if not tk.can_create:
         print("  GITHUB_MIRROR_PAT is not set — repo creation needs Administration:write; skipping")
         return failed
@@ -766,9 +906,20 @@ def create_missing(cfg, mp, tk, args) -> list[str]:
         try:
             seed(cfg, source, target, tk, Rewrite(cfg, mp, entry.get("rewrite")))
             print(f"  seeded {source} -> {target}")
+            seeded.append(entry)
         except Exception as exc:
             failed.append(f"{source} -> {target}: {redact(str(exc)).splitlines()[-1][:200]}")
             print(f"  FAILED {failed[-1]}")
+    if not args.dry_run and seeded:
+        map_path = Path(args.map)
+        updated_map = move_to_pairs(
+            map_path.read_text(encoding="utf-8"),
+            seeded,
+            datetime.now(timezone.utc).date().isoformat(),
+        )
+        map_path.write_text(updated_map, encoding="utf-8")
+        for entry in seeded:
+            print(f"  moved to pairs: {entry['source']}")
     return failed
 
 

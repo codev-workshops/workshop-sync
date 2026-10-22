@@ -204,5 +204,150 @@ class PublishMapReportTest(unittest.TestCase):
             self.assertEqual(report["needs_attention"], ["left_open"])
 
 
+MOVE_FIXTURE = """# Last verified: 2026-01-02
+defaults: {}
+pairs:
+  - source: existing-pair
+    target: existing-pair
+    # seeded 2026-01-01 as a content snapshot
+new_repos:
+  # discovered 2026-01-01; keep this manual note byte-for-byte
+  # this repo stays in new_repos until its seed succeeds
+  - source: dbx-migration-plugin
+
+  # auto-mapped 2026-01-02 by discover --auto-map
+  - source: auto-repo
+    target: auto-target
+    rewrite:
+      - from: "source/path"
+        to: "target/path"
+
+# Collisions documentation must remain untouched.
+collisions:
+  - source: collision
+    real_target: actual-target
+"""
+
+
+class MoveToPairsTest(unittest.TestCase):
+    def test_moves_entry_and_preserves_manual_comments_and_rewrite(self):
+        parsed = yaml.safe_load(MOVE_FIXTURE)
+        moved_entry = parsed["new_repos"][1]
+        updated = S.move_to_pairs(MOVE_FIXTURE, [moved_entry], "2026-02-03")
+
+        self.assertIn("# Last verified: 2026-02-03\n", updated)
+        self.assertIn(
+            "  # discovered 2026-01-01; keep this manual note byte-for-byte\n"
+            "  # this repo stays in new_repos until its seed succeeds\n"
+            "  - source: dbx-migration-plugin\n",
+            updated,
+        )
+        self.assertNotIn("# auto-mapped 2026-01-02 by discover --auto-map", updated)
+        self.assertIn(
+            "  - source: auto-repo\n"
+            "    target: auto-target\n"
+            "    # seeded 2026-02-03 as a content snapshot\n"
+            "    rewrite:\n"
+            "      - from: \"source/path\"\n"
+            "        to: \"target/path\"\n",
+            updated,
+        )
+        self.assertEqual(
+            updated[updated.index("# Collisions documentation") :],
+            MOVE_FIXTURE[MOVE_FIXTURE.index("# Collisions documentation") :],
+        )
+
+        before = yaml.safe_load(MOVE_FIXTURE)
+        after = yaml.safe_load(updated)
+        self.assertEqual(after["new_repos"], [before["new_repos"][0]])
+        self.assertEqual(after["pairs"][:-1], before["pairs"])
+        self.assertEqual(after["pairs"][-1], {
+            "source": "auto-repo",
+            "target": "auto-target",
+            "rewrite": [{"from": "source/path", "to": "target/path"}],
+        })
+
+
+CREATE_MAP = """# Last verified: 2026-01-02
+defaults:
+  source_org: source-org
+  target_org: target-org
+  sync: ff-only
+  new_repos: mirror
+pairs: []
+new_repos:
+  # Keep this failed seed and its note in new_repos.
+  - source: failure
+    target: failure-target
+  - source: success
+    target: success-target
+    rewrite:
+      - from: "before"
+        to: "after"
+
+collisions: []
+"""
+
+
+class CreateMissingTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.map_path = Path(self.temp.name) / "sync-map.yaml"
+        self.map_path.write_text(CREATE_MAP, encoding="utf-8")
+        self.mp = yaml.safe_load(CREATE_MAP)
+        self.cfg = self.mp["defaults"]
+        self.tokens = SimpleNamespace(
+            can_create=True,
+            src="source-token",
+            tgt="target-token",
+            for_org=lambda org: "source-token",
+        )
+
+    def test_success_moves_to_pairs_and_failure_stays_new(self):
+        def fake_seed(cfg, source, target, tk, rw):
+            if source == "failure":
+                raise RuntimeError("seed rejected")
+
+        def fake_api(path, method="GET", body=None, token=""):
+            return {"private": False} if method == "GET" else {}
+
+        args = SimpleNamespace(only=None, dry_run=False, map=str(self.map_path))
+        output = io.StringIO()
+        with mock.patch.object(S, "api_all", return_value=[]) as api_all, \
+                mock.patch.object(S, "api", side_effect=fake_api) as api, \
+                mock.patch.object(S, "seed", side_effect=fake_seed) as seed, \
+                redirect_stdout(output):
+            failed = S.create_missing(self.cfg, self.mp, self.tokens, args)
+
+        updated_text = self.map_path.read_text(encoding="utf-8")
+        updated = yaml.safe_load(updated_text)
+        self.assertEqual(failed, ["failure -> failure-target: seed rejected"])
+        self.assertEqual([entry["source"] for entry in updated["new_repos"]], ["failure"])
+        self.assertEqual(updated["pairs"], [{
+            "source": "success",
+            "target": "success-target",
+            "rewrite": [{"from": "before", "to": "after"}],
+        }])
+        self.assertIn("moved to pairs: success", output.getvalue())
+        self.assertNotIn("moved to pairs: failure", output.getvalue())
+        self.assertEqual(api_all.call_count, 1)
+        self.assertEqual(api.call_count, 4)
+        self.assertEqual(seed.call_count, 2)
+
+    def test_dry_run_does_not_change_map_or_seed(self):
+        original = self.map_path.read_text(encoding="utf-8")
+        args = SimpleNamespace(only=None, dry_run=True, map=str(self.map_path))
+        with mock.patch.object(S, "api_all", return_value=[]), \
+                mock.patch.object(S, "api") as api, \
+                mock.patch.object(S, "seed") as seed:
+            failed = S.create_missing(self.cfg, self.mp, self.tokens, args)
+
+        self.assertEqual(failed, [])
+        self.assertEqual(self.map_path.read_text(encoding="utf-8"), original)
+        api.assert_not_called()
+        seed.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

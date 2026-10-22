@@ -129,13 +129,13 @@ reasons a human must look).
 ### Scheduled run
 
 [`upstream-sync.yml`](.github/workflows/upstream-sync.yml) runs every other Sunday (even ISO
-weeks; `workflow_dispatch` any time): `discover --auto-map`, publish the map update, then
-`apply --direct-push --auto-merge --create-missing` to seed the new repos in the same run.
-Unmapped sources with no same-name target are auto-mapped; same-name target cases and gone
-sources remain judgment items. Conflicts and branches without a snapshot marker also open an
-issue titled `Upstream sync needs attention …` (label `sync-attention`) for the Devin
-automation. Sync failures instead open a separate `Upstream sync failed …` record issue and
-mark the run failed; they do not trigger Devin.
+weeks; `workflow_dispatch` any time): `discover --auto-map`, then
+`apply --direct-push --auto-merge --create-missing` to seed new repos and move successful
+seeds into `pairs:`, then publish the updated map. Unmapped sources with no same-name target
+are auto-mapped; same-name target cases and gone sources remain judgment items. Conflicts and
+branches without a snapshot marker also open an issue titled `Upstream sync needs attention …`
+(label `sync-attention`) for the Devin automation. Sync failures instead open a separate
+`Upstream sync failed …` record issue and mark the run failed; they do not trigger Devin.
 Repo secrets
 (GitHub reserves the `GITHUB_` prefix): `SYNC_UPSTREAM_READ_PAT` (read on the source org, used
 as `GH_TOKEN`), `SYNC_MIRROR_PAT` (`GITHUB_MIRROR_PAT`), `SYNC_BOT_PAT` (`GITHUB_SYNC_BOT_PAT`).
@@ -313,11 +313,12 @@ columns. Exit code 10 means there are rows to append; 0 means the tracker is in 
 ## Maintenance
 
 `discover --auto-map` adds unmapped source repos with no same-name target (and not listed in
-`ignore_targets:`) to `new_repos:`. The scheduled run publishes that map-only change before
-`apply --create-missing` seeds them. Same-name target cases are never paired by name and, along
+`ignore_targets:`) to `new_repos:`. `apply --create-missing` seeds them and automatically moves
+successful seeds into `pairs:`; failed seeds stay in `new_repos:`. The scheduled run publishes
+the combined map update after apply. Same-name target cases are never paired by name and, along
 with gone sources, remain Devin judgment items. Since targets no longer share history with
-their sources, root commit fingerprinting no longer works; confirm pairs by comparing content
-and move the resolved ones from `new_repos:` into `pairs:` after they are seeded.
+their sources, root commit fingerprinting no longer works; confirm same-name pairs by
+comparing content.
 
 This repo is deliberately *not* in the map: it has no upstream counterpart, so the catalog repo
 (`workshop-content`) can stay an exact mirror of its source instead of carrying local tooling
