@@ -138,7 +138,7 @@ branches without a snapshot marker also open an issue titled `Upstream sync need
 `Upstream sync failed …` record issue and mark the run failed; they do not trigger Devin.
 Repo secrets
 (GitHub reserves the `GITHUB_` prefix): `SYNC_UPSTREAM_READ_PAT` (read on the source org, used
-as `GH_TOKEN`), `SYNC_BOT_PAT` (both `GITHUB_SYNC_BOT_PAT` and `GITHUB_MIRROR_PAT`: the `reslk` token with Contents, Pull requests, Administration and Workflows write, and user-level push protection off so flagged upstream content can be seeded; `SYNC_MIRROR_PAT` is no longer used).
+as `GH_TOKEN`), `SYNC_MIRROR_PAT` (`GITHUB_MIRROR_PAT`), `SYNC_BOT_PAT` (`GITHUB_SYNC_BOT_PAT`).
 
 Credentials: reading the source org and opening sync PRs works with any token that has contents
 access to both orgs plus pull-request write on the target (`gh auth login` is enough). No
