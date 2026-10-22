@@ -107,34 +107,11 @@ jobs:
             report.json
           if-no-files-found: ignore
 
-      - name: Escalate to Devin when the run needs attention
+      - name: "Escalate: failures to a record issue, judgment items to Devin"
         if: steps.gate.outputs.run == 'true' && always()
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ ! -f report.json ]; then
-            attention='["run-crashed"]'
-          else
-            attention=$(python -c 'import json;print(json.dumps(json.load(open("report.json"))["needs_attention"]))')
-          fi
-          if [ "$attention" = "[]" ]; then
-            echo "nothing needs attention"; exit 0
-          fi
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          {
-            echo "The scheduled sync run needs a look: \`$attention\`."
-            echo
-            echo "Run: $run_url (logs and \`report.json\` are attached as an artifact)."
-            echo
-            echo '```json'; cat report.json 2>/dev/null || echo '{"error": "apply did not finish"}'; echo '```'
-            echo
-            echo '<details><summary>apply.log</summary>'; echo; echo '```'
-            tail -n 200 apply.log 2>/dev/null || true
-            echo '```'; echo '</details>'
-          } > issue.md
-          gh issue create --repo "${{ github.repository }}" \
-            --title "Upstream sync needs attention ($(date -u +%F), run ${{ github.run_id }})" \
-            --label sync-attention --body-file issue.md \
-          || gh issue create --repo "${{ github.repository }}" \
-            --title "Upstream sync needs attention ($(date -u +%F), run ${{ github.run_id }})" \
-            --body-file issue.md
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/escalate.py

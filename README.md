@@ -130,11 +130,12 @@ reasons a human must look).
 
 [`upstream-sync.yml`](.github/workflows/upstream-sync.yml) runs every other Sunday (even ISO
 weeks; `workflow_dispatch` any time): `apply --direct-push --auto-merge --create-missing`,
-then `discover`. When `needs_attention` is non-empty — a conflict, a refused push/merge, a
-branch without a snapshot marker, a seed failure, or a source repo missing from the map — it
-opens an issue titled `Upstream sync needs attention …` (label `sync-attention`) with
-`report.json` and the log. The Devin automation is triggered by that issue and works only the
-listed items, following the playbook. Nothing else starts a Devin session. Repo secrets
+then `discover`. Judgment items in `needs_attention` — such as conflicts, a branch without a
+snapshot marker, or a source repo missing from the map — open an issue titled `Upstream sync
+needs attention …` (label `sync-attention`) for the Devin automation. Sync failures instead
+open a separate `Upstream sync failed …` record issue and mark the run failed; they do not
+trigger Devin.
+Repo secrets
 (GitHub reserves the `GITHUB_` prefix): `SYNC_UPSTREAM_READ_PAT` (read on the source org, used
 as `GH_TOKEN`), `SYNC_MIRROR_PAT` (`GITHUB_MIRROR_PAT`), `SYNC_BOT_PAT` (`GITHUB_SYNC_BOT_PAT`).
 
