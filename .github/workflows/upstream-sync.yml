@@ -12,7 +12,10 @@
 #   SYNC_UPSTREAM_READ_PAT  optional; becomes GH_TOKEN, the "ambient" token of the
 #                           script. Cognition-Partner-Workshops is public, so the
 #                           workflow's own github.token is used when it is unset.
-#   SYNC_MIRROR_PAT         -> GITHUB_MIRROR_PAT (target org contents + administration)
+#   SYNC_BOT_PAT            -> GITHUB_MIRROR_PAT too: seeding new repos (needs
+#                           Administration + Workflows; reslk has user-level push
+#                           protection off so upstream content that GitHub flags
+#                           as a secret can still be seeded). SYNC_MIRROR_PAT is unused.
 #   SYNC_BOT_PAT            -> GITHUB_SYNC_BOT_PAT (sync bot: direct pushes, PR merges)
 name: upstream-sync
 
@@ -67,7 +70,7 @@ jobs:
         if: steps.gate.outputs.run == 'true' && !cancelled()
         env:
           GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_READ_PAT || github.token }}
-          GITHUB_MIRROR_PAT: ${{ secrets.SYNC_MIRROR_PAT }}
+          GITHUB_MIRROR_PAT: ${{ secrets.SYNC_BOT_PAT }}
           ONLY: ${{ inputs.only }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
@@ -81,7 +84,7 @@ jobs:
         if: steps.gate.outputs.run == 'true' && !cancelled()
         env:
           GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_READ_PAT || github.token }}
-          GITHUB_MIRROR_PAT: ${{ secrets.SYNC_MIRROR_PAT }}
+          GITHUB_MIRROR_PAT: ${{ secrets.SYNC_BOT_PAT }}
           GITHUB_SYNC_BOT_PAT: ${{ secrets.SYNC_BOT_PAT }}
           ONLY: ${{ inputs.only }}
           DRY_RUN: ${{ inputs.dry_run }}
