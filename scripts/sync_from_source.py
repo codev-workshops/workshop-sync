@@ -82,6 +82,14 @@ API = "https://api.github.com"
 GIT_BASE = os.environ.get("SYNC_GITHUB_BASE", "https://github.com:443")
 MAP_PATH = Path(__file__).resolve().parent.parent / "catalog" / "sync-map.yaml"
 
+
+def editable_map(args) -> Path:
+    """The map file `discover --auto-map` / `apply --create-missing` may rewrite."""
+    if Path(args.map).resolve() != MAP_PATH.resolve():
+        sys.exit(f"--auto-map/--create-missing edit only {MAP_PATH}; got --map {args.map}")
+    return MAP_PATH
+
+
 # Besides the default branch, only these may be synced.
 EXTRA_BRANCHES = ("main", "develop")
 TRAILER = "Upstream-Commit:"
@@ -656,7 +664,7 @@ def add_new_repos(map_text: str, names: list[str], today: str) -> str:
     lines = map_text.splitlines(keepends=True)
     line_text = lambda line: line.rstrip("\r\n")
     section = next((i for i, line in enumerate(lines)
-                    if re.match(r"^new_repos:\s*(\[\s*\])?\s*(?:#.*)?$",
+                    if re.match(r"^new_repos:(?:[ \t]*\[[ \t]*\])?[ \t]*(?:#.*)?$",
                                 line_text(line))), None)
     if section is None:
         raise ValueError("map has no top-level new_repos: section")
@@ -672,7 +680,7 @@ def add_new_repos(map_text: str, names: list[str], today: str) -> str:
             break
 
     section_text = line_text(lines[section])
-    empty_list = re.match(r"^(new_repos:)\s*\[\s*\]\s*(#.*)?$", section_text)
+    empty_list = re.match(r"^(new_repos:)[ \t]*\[[ \t]*\][ \t]*(#.*)?$", section_text)
     if empty_list:
         ending = lines[section][len(section_text):]
         comment = f" {empty_list.group(2)}" if empty_list.group(2) else ""
@@ -720,7 +728,7 @@ def move_to_pairs(map_text: str, entries: list[dict], today: str) -> str:
 
     def section_bounds(name):
         section = next((i for i, line in enumerate(lines)
-                        if re.match(rf"^{re.escape(name)}:\s*(?:\[\s*\])?\s*(?:#.*)?$",
+                        if re.match(rf"^{re.escape(name)}:(?:[ \t]*\[[ \t]*\])?[ \t]*(?:#.*)?$",
                                     line_text(line))), None)
         if section is None:
             raise ValueError(f"map has no top-level {name}: section")
@@ -790,7 +798,7 @@ def move_to_pairs(map_text: str, entries: list[dict], today: str) -> str:
     lines = [line for i, line in enumerate(lines) if i not in removed_lines]
 
     pairs_section = next((i for i, line in enumerate(lines)
-                          if re.match(r"^pairs:\s*(?:\[\s*\])?\s*(?:#.*)?$",
+                          if re.match(r"^pairs:(?:[ \t]*\[[ \t]*\])?[ \t]*(?:#.*)?$",
                                       line_text(line))), None)
     if pairs_section is None:
         raise ValueError("map has no top-level pairs: section")
@@ -805,7 +813,7 @@ def move_to_pairs(map_text: str, entries: list[dict], today: str) -> str:
             break
 
     section_text = line_text(lines[pairs_section])
-    empty_list = re.match(r"^(pairs:)\s*\[\s*\]\s*(#.*)?$", section_text)
+    empty_list = re.match(r"^(pairs:)[ \t]*\[[ \t]*\][ \t]*(#.*)?$", section_text)
     if empty_list:
         ending = lines[pairs_section][len(section_text):]
         comment = f" {empty_list.group(2)}" if empty_list.group(2) else ""
@@ -911,7 +919,7 @@ def create_missing(cfg, mp, tk, args) -> list[str]:
             failed.append(f"{source} -> {target}: {redact(str(exc)).splitlines()[-1][:200]}")
             print(f"  FAILED {failed[-1]}")
     if not args.dry_run and seeded:
-        map_path = Path(args.map)
+        map_path = editable_map(args)
         updated_map = move_to_pairs(
             map_path.read_text(encoding="utf-8"),
             seeded,
@@ -992,7 +1000,7 @@ def cmd_discover(cfg, mp, tk, args):
             for name in candidates:
                 print(f"DRY-RUN would auto-map: {name}")
         elif candidates:
-            map_path = Path(args.map)
+            map_path = editable_map(args)
             updated_map = add_new_repos(
                 map_path.read_text(encoding="utf-8"),
                 candidates,

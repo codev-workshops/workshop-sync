@@ -90,6 +90,9 @@ class DiscoverAutoMapTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.map_path = Path(self.temp.name) / "sync-map.yaml"
+        map_path_patch = mock.patch.object(S, "MAP_PATH", self.map_path)
+        map_path_patch.start()
+        self.addCleanup(map_path_patch.stop)
         self.map_path.write_text(
             "# Last verified: 2026-01-02\ndefaults: {}\npairs: []\n"
             "new_repos: []\nignore_targets: []\n",
@@ -135,6 +138,27 @@ class DiscoverAutoMapTest(unittest.TestCase):
         self.assertEqual(report["discover"]["auto_mapped"], [])
         self.assertIn("DRY-RUN would auto-map: a", output)
         self.assertIn("DRY-RUN would auto-map: c", output)
+
+    def test_auto_map_rejects_different_map_path_without_writing(self):
+        other_map_path = self.map_path.parent / "other-map.yaml"
+        other_map_path.write_text("new_repos: []\n", encoding="utf-8")
+        original_map = self.map_path.read_text(encoding="utf-8")
+        original_other_map = other_map_path.read_text(encoding="utf-8")
+        args = SimpleNamespace(
+            auto_map=True,
+            dry_run=False,
+            map=str(other_map_path),
+            report=str(self.report_path),
+        )
+        mp = yaml.safe_load(original_map)
+
+        with mock.patch.object(S, "api_all", side_effect=self.api_all):
+            with self.assertRaises(SystemExit) as raised:
+                S.cmd_discover(self.cfg, mp, SimpleNamespace(src="src", tgt="tgt"), args)
+
+        self.assertIn("--auto-map/--create-missing edit only", str(raised.exception))
+        self.assertEqual(self.map_path.read_text(encoding="utf-8"), original_map)
+        self.assertEqual(other_map_path.read_text(encoding="utf-8"), original_other_map)
 
     def test_ignore_targets_are_not_auto_mapped(self):
         self.map_path.write_text(
@@ -294,6 +318,9 @@ class CreateMissingTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.map_path = Path(self.temp.name) / "sync-map.yaml"
+        map_path_patch = mock.patch.object(S, "MAP_PATH", self.map_path)
+        map_path_patch.start()
+        self.addCleanup(map_path_patch.stop)
         self.map_path.write_text(CREATE_MAP, encoding="utf-8")
         self.mp = yaml.safe_load(CREATE_MAP)
         self.cfg = self.mp["defaults"]
