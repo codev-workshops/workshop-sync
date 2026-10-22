@@ -25,7 +25,7 @@
 # mentions of the source org) into `codev-workshops/<repo>`; `{from, to}` is a literal
 # replacement. Without it every upstream edit of such a line conflicts.
 #
-# Last verified: 2026-09-21
+# Last verified: 2026-10-22
 
 defaults:
   source_org: Cognition-Partner-Workshops
@@ -338,13 +338,39 @@ pairs:
   - source: uc-reinsurance-workbench
     target: uc-reinsurance-workbench
     # seeded 2026-09-21 as a content snapshot
+  - source: DWHMigrationDemo
+    target: DWHMigrationDemo
+    # seeded 2026-10-22 as a content snapshot
+  - source: aws2-modules
+    target: aws2-modules
+    # seeded 2026-10-22 as a content snapshot
+  - source: dbx-redshift-migration
+    target: dbx-redshift-migration
+    # seeded 2026-10-22 as a content snapshot
+  - source: demo-ledger-service
+    target: demo-ledger-service
+    # seeded 2026-10-22 as a content snapshot
+  - source: odoo
+    target: odoo
+    # seeded 2026-10-22 as a content snapshot (default branch 20.0)
+  - source: otterworks-workshop-2610
+    target: otterworks-workshop-2610
+    # seeded 2026-10-22 as a content snapshot
+  - source: teradataext
+    target: teradataext
+    # seeded 2026-10-22 as a content snapshot
+  - source: uc-integration-migration-biztalk-to-spring-boot
+    target: uc-integration-migration-biztalk-to-spring-boot
+    # seeded 2026-10-22 as a content snapshot
 
 # Source repos with no counterpart in codev-workshops. With `new_repos: mirror` these
 # are created and populated on the next run, then moved into `pairs:`.
 new_repos:
-  # discovered 2026-09-07; seeding on 2026-09-21 blocked by GitHub push protection
-  # (Databricks API token in skills/factory-doctor/tests/test_doctor.py) — a human must
-  # allow it target-side via the unblock URL in the run log, then re-run --create-missing
+  # discovered 2026-09-07; seeding blocked by GitHub push protection on 2026-09-21 and
+  # again 2026-10-22 (secret in skills/factory-doctor/tests/test_doctor.py:730) — a human
+  # must allow it target-side at
+  # https://github.com/codev-workshops/dbx-migration-plugin/security/secret-scanning/unblock-secret/3L2UeKmdWUXX8aOZjKiLCBF6XQe
+  # then the next run's --create-missing seeds it
   - source: dbx-migration-plugin
 
 
