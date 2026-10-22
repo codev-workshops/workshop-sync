@@ -60,7 +60,7 @@ jobs:
 
       - name: Install
         if: steps.gate.outputs.run == 'true'
-        run: pip install --only-binary :all: pyyaml==6.0.2
+        run: pip install --only-binary ":all:" pyyaml==6.0.2
 
       - name: Apply
         if: steps.gate.outputs.run == 'true'
