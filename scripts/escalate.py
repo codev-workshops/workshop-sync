@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Route upstream sync failures to a record issue and judgment items to Devin."""
+"""Route upstream sync failures to Slack and judgment items to Devin."""
 
 import copy
 import json
@@ -9,6 +9,8 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 FAILURE_KEYS = {"failed", "seed_failed", "run-crashed"}
 
@@ -56,7 +58,7 @@ def attention_body(report, judgment, failures, failure_issue_url, run_url, apply
         lines.extend(
             [
                 "",
-                f"Failures in this run ({failure_keys}) are tracked in "
+                f"Failures in this run ({failure_keys}) were sent to Slack and are tracked in "
                 f"{failure_issue_url}; they are not part of this issue — do not act on them.",
             ]
         )
@@ -122,12 +124,44 @@ def create_issue(repo, title, body, dry_run):
             body_path.unlink(missing_ok=True)
 
 
+def slack_payload(failure_lines, run_url, run_id, issue_url):
+    shown_lines = [line[:297] + "..." if len(line) > 300 else line for line in failure_lines[:20]]
+    if len(failure_lines) > 20:
+        shown_lines.append(f"…and {len(failure_lines) - 20} more")
+    issue_number = issue_url.rstrip("/").rsplit("/", 1)[-1]
+    text = [
+        f":warning: *Upstream sync had issues* in codev-workshops sync — run <{run_url}|{run_id}>"
+    ]
+    text.extend(f"• {line}" for line in shown_lines)
+    text.append(f"Tracked in <{issue_url}|issue #{issue_number}>")
+    return {"text": "\n".join(text)}
+
+
+def post_slack(webhook_url, payload):
+    request = Request(
+        webhook_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            status = response.status
+        if not 200 <= status < 300:
+            print(f"::warning::Slack alert failed (HTTP {status})")
+    except HTTPError as error:
+        print(f"::warning::Slack alert failed (HTTP {error.code})")
+    except Exception:
+        print("::warning::Slack alert failed (HTTP unknown)")
+
+
 def main():
     report_path = Path(os.environ.get("REPORT", "report.json"))
     apply_log_path = Path(os.environ.get("APPLY_LOG", "apply.log"))
     repo = os.environ.get("REPO", "")
     run_id = os.environ.get("RUN_ID", "")
     run_url = os.environ.get("RUN_URL", "")
+    slack_webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
     dry_run = os.environ.get("DRY_RUN") == "1"
 
     report, attention = read_report(report_path)
@@ -151,6 +185,16 @@ def main():
         failure_issue_url = create_issue(
             repo, failure_title, failure_body(failure_lines, run_url, apply_log_path), dry_run
         )
+
+        if slack_webhook_url:
+            payload = slack_payload(failure_lines, run_url, run_id, failure_issue_url)
+            if dry_run:
+                print("DRY_RUN Slack payload:")
+                print(json.dumps(payload, indent=2))
+            else:
+                post_slack(slack_webhook_url, payload)
+        else:
+            print("::warning::SLACK_SYNC_WEBHOOK_URL is not set; Slack alert skipped")
 
     if judgment:
         filtered_report = copy.deepcopy(report)

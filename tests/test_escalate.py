@@ -5,7 +5,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "escalate.py"
@@ -49,12 +51,13 @@ class EscalationTest(unittest.TestCase):
     def issue_blocks(self, output):
         return re.findall(
             r"DRY_RUN issue title: (.*?)\nDRY_RUN issue body:\n"
-            r"(.*?)(?=\nDRY_RUN issue title:|\Z)",
+            r"(.*?)(?=\nDRY_RUN issue title:|\nDRY_RUN Slack payload:|\Z)",
             output,
             flags=re.DOTALL,
         )
 
-    def test_missing_report_creates_failure_record_issue_only(self):
+    def test_missing_report_creates_failure_issue_and_slack_only(self):
+        self.env["SLACK_WEBHOOK_URL"] = "https://hooks.example.invalid/token"
         result = self.run_script()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         blocks = self.issue_blocks(result.stdout)
@@ -62,6 +65,7 @@ class EscalationTest(unittest.TestCase):
         self.assertTrue(blocks[0][0].startswith("Upstream sync failed ("))
         self.assertNotIn("Upstream sync needs attention", result.stdout)
         self.assertIn("the sync run crashed before report.json was written", blocks[0][1])
+        self.assertIn("DRY_RUN Slack payload:", result.stdout)
 
     def test_seed_failure_and_unmapped_are_split_and_filtered(self):
         self.write_report(
@@ -86,6 +90,7 @@ class EscalationTest(unittest.TestCase):
                 },
             }
         )
+        self.env["SLACK_WEBHOOK_URL"] = "https://hooks.example.invalid/token"
         result = self.run_script()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         blocks = self.issue_blocks(result.stdout)
@@ -94,12 +99,7 @@ class EscalationTest(unittest.TestCase):
         attention_title, attention_body = blocks[1]
         self.assertTrue(failure_title.startswith("Upstream sync failed ("))
         self.assertTrue(attention_title.startswith("Upstream sync needs attention ("))
-        self.assertIn(
-            "Failures in this run (seed_failed) are tracked in ", attention_body
-        )
-        self.assertIn(
-            "they are not part of this issue — do not act on them.", attention_body
-        )
+        self.assertIn("were sent to Slack and are tracked in", attention_body)
         filtered_json = re.search(r"```json\n(.*?)\n```", attention_body, flags=re.DOTALL)
         self.assertIsNotNone(filtered_json)
         report = json.loads(filtered_json.group(1))
@@ -108,14 +108,16 @@ class EscalationTest(unittest.TestCase):
         self.assertNotIn("seed_failed", report["apply"])
         log_tail = attention_body.split("<details><summary>apply.log</summary>", 1)[1]
         self.assertNotIn("FAILED", log_tail)
+        self.assertIn("DRY_RUN Slack payload:", result.stdout)
 
-    def test_unmapped_only_creates_attention_issue(self):
+    def test_unmapped_only_creates_attention_issue_without_slack(self):
         self.write_report({"needs_attention": ["unmapped"], "apply": {}, "discover": {}})
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         blocks = self.issue_blocks(result.stdout)
         self.assertEqual(len(blocks), 1)
         self.assertTrue(blocks[0][0].startswith("Upstream sync needs attention ("))
+        self.assertNotIn("Slack payload", result.stdout)
 
     def test_empty_attention_does_nothing(self):
         self.write_report({"needs_attention": [], "apply": {}, "discover": {}})
@@ -123,21 +125,49 @@ class EscalationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), "nothing needs attention")
 
-    def test_failed_only_creates_failure_record_issue(self):
+    def test_failed_only_creates_failure_issue_and_slack(self):
         self.write_report(
             {
                 "needs_attention": ["failed"],
                 "apply": {"failed": ["one failed operation"], "seed_failed": []},
             }
         )
+        self.env["SLACK_WEBHOOK_URL"] = "https://hooks.example.invalid/token"
         result = self.run_script()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         blocks = self.issue_blocks(result.stdout)
         self.assertEqual(len(blocks), 1)
         self.assertTrue(blocks[0][0].startswith("Upstream sync failed ("))
         self.assertIn("- one failed operation", blocks[0][1])
+        self.assertIn("DRY_RUN Slack payload:", result.stdout)
 
-    def test_issue_creation_retries_without_label(self):
+    def test_missing_webhook_warns_and_failure_exit_is_preserved(self):
+        self.write_report(
+            {"needs_attention": ["failed"], "apply": {"failed": ["operation failed"]}}
+        )
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "::warning::SLACK_SYNC_WEBHOOK_URL is not set; Slack alert skipped", result.stdout
+        )
+
+    def test_posts_json_payload_to_local_webhook_and_retries_issue_without_label(self):
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                received.append((self.headers.get("Content-Type"), self.rfile.read(length)))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.start()
         gh_bin = self.root / "bin"
         gh_bin.mkdir()
         gh_stub = gh_bin / "gh"
@@ -158,12 +188,25 @@ class EscalationTest(unittest.TestCase):
         self.env.update(
             {
                 "DRY_RUN": "0",
+                "SLACK_WEBHOOK_URL": f"http://127.0.0.1:{server.server_port}/incoming",
                 "GH_CALLS": str(calls_path),
                 "PATH": f"{gh_bin}{os.pathsep}{self.env['PATH']}",
             }
         )
-        result = self.run_script()
+        try:
+            result = self.run_script()
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join()
+
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(len(received), 1)
+        content_type, body = received[0]
+        self.assertEqual(content_type, "application/json")
+        payload = json.loads(body)
+        self.assertIn("text", payload)
+        self.assertIn("issue #21", payload["text"])
         gh_calls = calls_path.read_text().splitlines()
         self.assertEqual(len(gh_calls), 2)
         self.assertIn("--label", gh_calls[0])

@@ -133,8 +133,8 @@ weeks; `workflow_dispatch` any time): `apply --direct-push --auto-merge --create
 then `discover`. Judgment items in `needs_attention` — such as conflicts, a branch without a
 snapshot marker, or a source repo missing from the map — open an issue titled `Upstream sync
 needs attention …` (label `sync-attention`) for the Devin automation. Sync failures instead
-open a separate `Upstream sync failed …` record issue and mark the run failed; they do not
-trigger Devin.
+open a separate record issue and are alerted to Slack; they do not trigger Devin. Configure
+the optional `SLACK_SYNC_WEBHOOK_URL` secret with an incoming webhook for `#workshop-tracker`.
 Repo secrets
 (GitHub reserves the `GITHUB_` prefix): `SYNC_UPSTREAM_READ_PAT` (read on the source org, used
 as `GH_TOKEN`), `SYNC_MIRROR_PAT` (`GITHUB_MIRROR_PAT`), `SYNC_BOT_PAT` (`GITHUB_SYNC_BOT_PAT`).
