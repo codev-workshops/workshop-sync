@@ -107,11 +107,10 @@ jobs:
             report.json
           if-no-files-found: ignore
 
-      - name: "Escalate: failures to Slack, judgment items to Devin"
+      - name: "Escalate: failures to a record issue, judgment items to Devin"
         if: steps.gate.outputs.run == 'true' && always()
         env:
           GH_TOKEN: ${{ github.token }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_SYNC_WEBHOOK_URL }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
