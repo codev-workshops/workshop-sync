@@ -70,6 +70,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -638,6 +639,62 @@ def write_report(path: str, command: str, data: dict):
     p.write_text(json.dumps(report, indent=2) + "\n")
 
 
+def add_new_repos(map_text: str, names: list[str], today: str) -> str:
+    """Append new source names to the map without rewriting its comments or formatting."""
+    if not names:
+        return map_text
+
+    parsed = yaml.safe_load(map_text) or {}
+    existing = {
+        entry["source"] for entry in (parsed.get("new_repos") or [])
+        if isinstance(entry, dict) and "source" in entry
+    }
+    additions = sorted(set(names) - existing)
+    if not additions:
+        return map_text
+
+    lines = map_text.splitlines(keepends=True)
+    line_text = lambda line: line.rstrip("\r\n")
+    section = next((i for i, line in enumerate(lines)
+                    if re.match(r"^new_repos:\s*(\[\s*\])?\s*(?:#.*)?$",
+                                line_text(line))), None)
+    if section is None:
+        raise ValueError("map has no top-level new_repos: section")
+
+    next_key = next((i for i in range(section + 1, len(lines))
+                     if re.match(r"^[A-Za-z_][\w-]*\s*:", line_text(lines[i]))), len(lines))
+    insert_at = next_key
+    while insert_at > section + 1:
+        previous = line_text(lines[insert_at - 1])
+        if not previous.strip() or previous.startswith("#"):
+            insert_at -= 1
+        else:
+            break
+
+    section_text = line_text(lines[section])
+    empty_list = re.match(r"^(new_repos:)\s*\[\s*\]\s*(#.*)?$", section_text)
+    if empty_list:
+        ending = lines[section][len(section_text):]
+        comment = f" {empty_list.group(2)}" if empty_list.group(2) else ""
+        lines[section] = f"{empty_list.group(1)}{comment}{ending}"
+
+    newline = "\r\n" if "\r\n" in map_text else "\n"
+    if insert_at and not lines[insert_at - 1].endswith(("\n", "\r")):
+        lines[insert_at - 1] += newline
+    additions_text = [
+        f"  # auto-mapped {today} by discover --auto-map{newline}",
+        *(f"  - source: {name}{newline}" for name in additions),
+    ]
+    lines[insert_at:insert_at] = additions_text
+    updated = "".join(lines)
+    return re.sub(
+        r"(?m)^(# Last verified: )\d{4}-\d{2}-\d{2}(?=[ \t]*(?:\r?$))",
+        rf"\g<1>{today}",
+        updated,
+        count=1,
+    )
+
+
 def cmd_squash(cfg, mp, tk, args):
     """Drop imported upstream history: one snapshot commit of the target's own content.
 
@@ -775,6 +832,27 @@ def cmd_discover(cfg, mp, tk, args):
             print(f"  - {g}")
 
     unmapped = sorted(src - mapped_src)
+    auto_map = getattr(args, "auto_map", False)
+    auto_mapped = []
+    if auto_map:
+        ignored_targets = set(mp.get("ignore_targets") or [])
+        candidates = [name for name in unmapped if name not in tgt and name not in ignored_targets]
+        if args.dry_run:
+            for name in candidates:
+                print(f"DRY-RUN would auto-map: {name}")
+        elif candidates:
+            map_path = Path(args.map)
+            updated_map = add_new_repos(
+                map_path.read_text(encoding="utf-8"),
+                candidates,
+                datetime.now(timezone.utc).date().isoformat(),
+            )
+            map_path.write_text(updated_map, encoding="utf-8")
+            auto_mapped = candidates
+            for name in auto_mapped:
+                print(f"auto-mapped: {name}")
+        unmapped = [name for name in unmapped if name not in auto_mapped]
+
     if unmapped:
         print("\nsource repos missing from the map:")
         for s in unmapped:
@@ -784,7 +862,10 @@ def cmd_discover(cfg, mp, tk, args):
     if not gone and not unmapped:
         print("map is complete: every source repo is either paired or listed under new_repos")
     if args.report:
-        write_report(args.report, "discover", {"gone": sorted(gone), "unmapped": unmapped})
+        data = {"gone": sorted(gone), "unmapped": unmapped}
+        if auto_map:
+            data["auto_mapped"] = auto_mapped
+        write_report(args.report, "discover", data)
 
 
 def cmd_publish_map(cfg, mp, tk, args):
@@ -849,8 +930,14 @@ def cmd_publish_map(cfg, mp, tk, args):
         why = merge_pr({"target_org": org}, name, pr, sha, tk)
         if why:
             print(f"NOT MERGED ({why}) — PR left open")
+            if args.report:
+                write_report(args.report, "publish-map", {
+                    "left_open": [f"workshop-sync map PR {pr['html_url']}: {why}"],
+                })
         else:
             print("merged")
+            if args.report:
+                write_report(args.report, "publish-map", {"left_open": []})
             run(["git", "fetch", "-q", "origin", base], cwd=root, check=False)
 
 
@@ -861,6 +948,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     ap.add_argument("--only", help="restrict to one repo (source or target name)")
     ap.add_argument("--create-missing", action="store_true", help="apply: also create/seed new_repos")
+    ap.add_argument("--auto-map", action="store_true",
+                    help="discover: add unmapped source repos with no same-name target to new_repos:")
     ap.add_argument("--auto-merge", action="store_true",
                     help="apply: merge each sync PR immediately with GITHUB_SYNC_BOT_PAT")
     ap.add_argument("--direct-push", action="store_true",
@@ -873,7 +962,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
                     help=f"status/apply: pairs classified concurrently (default {DEFAULT_JOBS})")
     ap.add_argument("--report", metavar="FILE",
-                    help="apply/discover: also write a JSON summary (merged into FILE if it exists)")
+                    help="apply/discover/publish-map: write a JSON summary (merged into FILE if it exists)")
     ap.add_argument("--map", default=str(MAP_PATH))
     args = ap.parse_args()
     args.keep = False

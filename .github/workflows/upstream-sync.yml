@@ -1,11 +1,10 @@
 # Scheduled upstream sync: Cognition-Partner-Workshops -> codev-workshops.
 #
-# The routine path (classify every pair, fast-forward the ones that moved, seed new
-# repos) runs here without a Devin session. Only when the run needs judgement —
-# a content conflict, a refused push/merge, a branch without a snapshot marker, a
-# repo missing from the map — does it open an issue in this repo; the Devin
-# automation is triggered by that issue and follows the playbook for exactly the
-# items listed.
+# The routine path (discover and auto-map eligible new repos, publish that map,
+# then classify pairs, fast-forward the ones that moved, and seed new repos) runs
+# here without a Devin session. Only unresolved judgment — a same-name repo that
+# needs identity checking, a gone source, a content conflict, a refused push/merge,
+# or a branch without a snapshot marker — opens an issue for the Devin automation.
 #
 # Secrets (Settings -> Secrets and variables -> Actions); GitHub reserves the
 # `GITHUB_` prefix, hence the names:
@@ -30,7 +29,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 concurrency:
@@ -63,8 +62,31 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: pip install --only-binary ":all:" pyyaml==6.0.2
 
+      - name: Discover
+        if: steps.gate.outputs.run == 'true' && !cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_READ_PAT || github.token }}
+          GITHUB_MIRROR_PAT: ${{ secrets.SYNC_MIRROR_PAT }}
+          ONLY: ${{ inputs.only }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -o pipefail
+          flags="--report report.json"
+          [ -z "$ONLY" ] && flags="$flags --auto-map"
+          [ "$DRY_RUN" = "true" ] && flags="$flags --dry-run"
+          python scripts/sync_from_source.py discover $flags 2>&1 | tee discover.log
+
+      - name: Publish map
+        if: steps.gate.outputs.run == 'true' && !cancelled() && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_SYNC_BOT_PAT: ${{ secrets.SYNC_BOT_PAT }}
+        run: |
+          set -o pipefail
+          python scripts/sync_from_source.py publish-map --auto-merge --report report.json --message "sync-map: auto-map new upstream repos ($(date -u +%F))" 2>&1 | tee publish-map.log
+
       - name: Apply
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && !cancelled()
         env:
           GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_READ_PAT || github.token }}
           GITHUB_MIRROR_PAT: ${{ secrets.SYNC_MIRROR_PAT }}
@@ -78,23 +100,19 @@ jobs:
           [ "$DRY_RUN" = "true" ] && flags="$flags --dry-run"
           python scripts/sync_from_source.py apply $flags 2>&1 | tee apply.log
 
-      - name: Discover
-        if: steps.gate.outputs.run == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_READ_PAT || github.token }}
-          GITHUB_MIRROR_PAT: ${{ secrets.SYNC_MIRROR_PAT }}
-        run: python scripts/sync_from_source.py discover --report report.json 2>&1 | tee discover.log
-
       - name: Summary
         if: steps.gate.outputs.run == 'true' && always()
         run: |
           {
             echo '## Upstream sync'
+            echo '### Discover'
+            echo '```'; cat discover.log 2>/dev/null || true; echo '```'
+            echo '### Publish map'
+            echo '```'; cat publish-map.log 2>/dev/null || true; echo '```'
+            echo '### Apply'
             echo '```'
             grep -E '^(updated:|  pushed:|  left open:|  conflict:|  failed:|  FAILED)' apply.log || true
             echo '```'
-            echo '### Discover'
-            echo '```'; cat discover.log 2>/dev/null || true; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -104,6 +122,7 @@ jobs:
           path: |
             apply.log
             discover.log
+            publish-map.log
             report.json
           if-no-files-found: ignore
 
